@@ -9,6 +9,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.util.Log
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import android.view.View
 import android.widget.Toast
@@ -39,12 +41,54 @@ class CameraNativeView(
     private var isSurfaceCreated = false
     private var fps = 0
 
+    // Zoom state — back camera only
+    private var currentZoom = 1.0f
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
+
     init {
         glView.isKeepAspectRatio = true
         glView.holder.addCallback(this)
         rtmpCamera = RtmpCamera2(glView, this)
         rtmpCamera.setReTries(10)
         rtmpCamera.setFpsListener { fps = it }
+
+        // Native ScaleGestureDetector for smooth pinch-to-zoom on back camera.
+        // We accumulate zoom relative to the per-gesture baseline so each new
+        // pinch starts from the current level, not from 1x.
+        scaleGestureDetector = ScaleGestureDetector(
+            activity!!, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    // currentZoom already holds the level from any previous gesture
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    if (isFrontFacing(cameraName)) return false // back camera only
+                    // scaleFactor is a per-event delta (e.g. 1.02 = 2% bigger this frame).
+                    // Multiply into currentZoom so each frame accumulates smoothly.
+                    val newZoom = (currentZoom * detector.scaleFactor)
+                        .coerceIn(1.0f, rtmpCamera.getMaxZoom().coerceAtLeast(1.0f))
+                    if (kotlin.math.abs(newZoom - currentZoom) < 0.01f) return false
+                    currentZoom = newZoom
+                    try {
+                        rtmpCamera.setZoom(newZoom)
+                        Log.d("CameraNativeView", "zoom: ${"%.2f".format(newZoom)}")
+                    } catch (e: Exception) {
+                        Log.w("CameraNativeView", "setZoom error: ${e.message}")
+                    }
+                    return true
+                }
+            }
+        )
+
+        // Route multi-finger touches to the ScaleGestureDetector.
+        glView.setOnTouchListener { _, event ->
+            if (event.pointerCount >= 2) {
+                scaleGestureDetector.onTouchEvent(event)
+            }
+            true
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -54,11 +98,14 @@ class CameraNativeView(
     }
 
     override fun surfaceChanged(p0: SurfaceHolder, p1: Int, p2: Int, p3: Int) {
-        // TODO("Not yet implemented")
+        // No-op: pedro handles surface dimension changes internally
     }
 
     override fun surfaceDestroyed(p0: SurfaceHolder) {
-        // TODO("Not yet implemented")
+        Log.d("CameraNativeView", "surfaceDestroyed — stopping preview/stream")
+        isSurfaceCreated = false
+        if (rtmpCamera.isOnPreview) rtmpCamera.stopPreview()
+        if (rtmpCamera.isStreaming) rtmpCamera.stopStream()
     }
 
     override fun onAuthSuccessRtmp() {
@@ -95,6 +142,50 @@ class CameraNativeView(
 
     fun close() {
         Log.d("CameraNativeView", "close")
+    }
+
+    /**
+     * Switch between front and back camera using pedro's built-in method.
+     * This avoids the dispose+recreate pattern on the Flutter side, which
+     * caused the SurfaceManager.eglSetup crash reported in Firebase.
+     */
+    fun switchCamera() {
+        Log.d("CameraNativeView", "switchCamera")
+        try {
+            rtmpCamera.switchCamera()
+            currentZoom = 1.0f  // reset zoom — new camera starts at 1x
+            // Update tracked camera name to reflect the active camera
+            val cameraManager = activity?.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            if (cameraManager != null) {
+                for (id in cameraManager.cameraIdList) {
+                    val chars = cameraManager.getCameraCharacteristics(id)
+                    val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                    val isFront = facing == CameraMetadata.LENS_FACING_FRONT
+                    // pedro's switchCamera toggles the facing; determine new cameraName
+                    if (isFrontFacing(cameraName) != isFront) {
+                        cameraName = id
+                        break
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("CameraNativeView", "switchCamera error: ${e.message}")
+        }
+    }
+
+    /**
+     * Forward a MotionEvent from Flutter's GestureDetector to pedro's built-in
+     * zoom handler. Pedro uses ScaleGestureDetector internally to compute the
+     * zoom level from pinch events, then applies SCALER_CROP_REGION to Camera2.
+     * Only called for the back camera (zoom not supported on front camera).
+     */
+    fun handleZoom(event: MotionEvent) {
+        if (isFrontFacing(cameraName)) return  // zoom only on main camera
+        try {
+            rtmpCamera.setZoom(event)
+        } catch (e: Exception) {
+            Log.w("CameraNativeView", "setZoom error: ${e.message}")
+        }
     }
 
     fun takePicture(filePath: String, result: MethodChannel.Result) {
@@ -307,6 +398,32 @@ class CameraNativeView(
         ret["fps"] = fps
         result.success(ret)
     }
+
+    fun getMinZoomLevel(): Float = 1.0f
+
+    fun getMaxZoomLevel(): Float {
+        return try {
+            // pedro exposes getMaxZoom() directly on Camera2Base
+            rtmpCamera.getMaxZoom()
+        } catch (e: Exception) {
+            Log.w("CameraNativeView", "getMaxZoomLevel error: ${e.message}")
+            8.0f
+        }
+    }
+
+    fun setZoomLevel(zoom: Float) {
+        if (isFrontFacing(cameraName)) return
+        try {
+            // pedro 1.9.6 Camera2Base.setZoom(float) applies SCALER_CROP_REGION
+            // (or CONTROL_ZOOM_RATIO on newer devices) directly on the capture session.
+            rtmpCamera.setZoom(zoom)
+            Log.d("CameraNativeView", "setZoomLevel: $zoom")
+        } catch (e: Exception) {
+            Log.w("CameraNativeView", "setZoomLevel error: ${e.message}")
+        }
+    }
+
+    fun isFrontCamera(): Boolean = isFrontFacing(cameraName)
 
     override fun getView(): View {
         return glView

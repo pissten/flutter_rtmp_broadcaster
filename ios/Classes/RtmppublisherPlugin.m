@@ -1151,6 +1151,46 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [_camera stopVideoRecordingWithResult:result];
         } else if ([@"stopRecordingOrStreaming" isEqualToString:call.method]) {
             [_camera stopVideoRecordingOrStreamingWithResult:result];
+        } else if ([@"getMinZoomLevel" isEqualToString:call.method]) {
+            if (_camera && _camera.captureDevice) {
+                double minZoom = (double)_camera.captureDevice.minAvailableVideoZoomFactor;
+                result(@(minZoom));
+            } else {
+                result(@(1.0));
+            }
+        } else if ([@"getMaxZoomLevel" isEqualToString:call.method]) {
+            if (_camera && _camera.captureDevice) {
+                double maxZoom = (double)_camera.captureDevice.maxAvailableVideoZoomFactor;
+                result(@(maxZoom));
+            } else {
+                result(@(1.0));
+            }
+        } else if ([@"setZoomLevel" isEqualToString:call.method]) {
+            NSNumber *zoom = call.arguments[@"zoom"];
+            if (_camera && _camera.captureDevice) {
+                double zoomValue = [zoom doubleValue];
+                double minZoom = (double)_camera.captureDevice.minAvailableVideoZoomFactor;
+                double maxZoom = (double)_camera.captureDevice.maxAvailableVideoZoomFactor;
+                
+                // Validate zoom is within bounds
+                if (zoomValue < minZoom || zoomValue > maxZoom) {
+                    result([FlutterError errorWithCode:@"ZOOM_ERROR"
+                                               message:[NSString stringWithFormat:@"Zoom level out of bounds (should be between %f and %f)", minZoom, maxZoom]
+                                               details:nil]);
+                    return;
+                }
+                
+                NSError *error = nil;
+                if ([_camera.captureDevice lockForConfiguration:&error]) {
+                    _camera.captureDevice.videoZoomFactor = zoomValue;
+                    [_camera.captureDevice unlockForConfiguration];
+                    result(nil);
+                } else {
+                    result(getFlutterError(error));
+                }
+            } else {
+                result(nil);
+            }
         } else {
             result(FlutterMethodNotImplemented);
         }

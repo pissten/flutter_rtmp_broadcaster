@@ -185,6 +185,35 @@ public class FlutterRTMPStreaming : NSObject {
     public func close() {
         rtmpConnection.close()
     }
+    
+    // Zoom methods
+    @objc
+    public func getMinZoomLevel() -> Double {
+        return 1.0
+    }
+    
+    @objc
+    public func getMaxZoomLevel() -> Double {
+        guard let device = rtmpStream.videoCapture(for: 0)?.device else {
+            return 1.0
+        }
+        return Double(device.activeFormat.videoMaxZoomFactor)
+    }
+    
+    @objc
+    public func setZoomLevel(zoom: Double) {
+        guard let device = rtmpStream.videoCapture(for: 0)?.device else {
+            return
+        }
+        let clampedZoom = min(max(zoom, 1.0), Double(device.activeFormat.videoMaxZoomFactor))
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = CGFloat(clampedZoom)
+            device.unlockForConfiguration()
+        } catch {
+            print("Error setting zoom: \(error)")
+        }
+    }
 }
 
 

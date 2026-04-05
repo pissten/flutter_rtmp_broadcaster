@@ -157,6 +157,34 @@ internal class MethodCallHandlerImpl(
                 }
                 result.success(null)
             }
+            "getMinZoomLevel" -> {
+                Log.i("Stuff", "getMinZoomLevel")
+                try {
+                    val minZoom = camera?.getMinZoomLevel() ?: 1.0f
+                    result.success(minZoom.toDouble())
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+            "getMaxZoomLevel" -> {
+                Log.i("Stuff", "getMaxZoomLevel")
+                try {
+                    val maxZoom = camera?.getMaxZoomLevel() ?: 1.0f
+                    result.success(maxZoom.toDouble())
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+            "setZoomLevel" -> {
+                Log.i("Stuff", "setZoomLevel")
+                try {
+                    val zoom = call.argument<Double>("zoom")?.toFloat() ?: 1.0f
+                    camera?.setZoomLevel(zoom)
+                    result.success(null)
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
             else -> result.notImplemented()
         }
     }

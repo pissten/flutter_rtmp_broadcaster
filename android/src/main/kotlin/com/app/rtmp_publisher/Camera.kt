@@ -866,4 +866,17 @@ class Camera(
     override fun surfaceCreated(holder: SurfaceHolder) {
 
     }
+
+    // Zoom methods - safe defaults for now
+    fun getMinZoomLevel(): Float {
+        return 1.0f
+    }
+
+    fun getMaxZoomLevel(): Float {
+        return 1.0f
+    }
+
+    fun setZoomLevel(zoom: Float) {
+        Log.i(TAG, "setZoomLevel called: $zoom (not implemented)")
+    }
 }

@@ -10,6 +10,7 @@ import android.hardware.camera2.CameraMetadata
 import android.os.Build
 import android.os.Handler
 import android.util.Log
+import android.view.MotionEvent
 import android.view.OrientationEventListener
 import androidx.annotation.RequiresApi
 import com.app.rtmp_publisher.CameraPermissions.ResultCallback
@@ -169,10 +170,51 @@ class MethodCallHandlerImplNew(
                 }
             }
 
+            "switchCamera" -> {
+                Log.i("Stuff", "switchCamera")
+                try {
+                    getCameraView()?.switchCamera()
+                    result.success(null)
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+
             "getStreamStatistics" -> {
                 Log.i("Stuff", "getStreamStatistics")
                 try {
                     getCameraView()?.getStreamStatistics(result)
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+
+            "getMinZoomLevel" -> {
+                Log.i("Stuff", "getMinZoomLevel")
+                try {
+                    val minZoom = getCameraView()?.getMinZoomLevel() ?: 1.0f
+                    result.success(minZoom.toDouble())
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+
+            "getMaxZoomLevel" -> {
+                Log.i("Stuff", "getMaxZoomLevel")
+                try {
+                    val maxZoom = getCameraView()?.getMaxZoomLevel() ?: 1.0f
+                    result.success(maxZoom.toDouble())
+                } catch (e: Exception) {
+                    handleException(e, result)
+                }
+            }
+
+            "setZoomLevel" -> {
+                Log.i("Stuff", "setZoomLevel")
+                try {
+                    val zoom = call.argument<Double>("zoom")?.toFloat() ?: 1.0f
+                    getCameraView()?.setZoomLevel(zoom)
+                    result.success(null)
                 } catch (e: Exception) {
                     handleException(e, result)
                 }

@@ -945,6 +945,59 @@ class CameraController extends ValueNotifier<CameraValue> {
     }
   }
 
+  /// Gets the minimum zoom level supported by the camera.
+  Future<double> getMinZoomLevel() async {
+    try {
+      final double? minZoom = await _channel.invokeMethod<double>('getMinZoomLevel');
+      return minZoom ?? 1.0;
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Gets the maximum zoom level supported by the camera.
+  Future<double> getMaxZoomLevel() async {
+    try {
+      final double? maxZoom = await _channel.invokeMethod<double>('getMaxZoomLevel');
+      return maxZoom ?? 1.0;
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Sets the zoom level for the camera.
+  /// 
+  /// The [zoom] parameter must be between the values returned by
+  /// [getMinZoomLevel] and [getMaxZoomLevel].
+  Future<void> setZoomLevel(double zoom) async {
+    try {
+      await _channel.invokeMethod<void>(
+        'setZoomLevel',
+        <String, dynamic>{'zoom': zoom},
+      );
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Switches between front and back camera without disposing the controller.
+  ///
+  /// This avoids the surface teardown/recreate cycle that can cause
+  /// EGL crashes on some devices (SurfaceManager.eglSetup).
+  Future<void> switchCamera() async {
+    if (!value.isInitialized! || _isDisposed) {
+      throw CameraException(
+        'Uninitialized CameraController',
+        'switchCamera was called on uninitialized CameraController',
+      );
+    }
+    try {
+      await _channel.invokeMethod<void>('switchCamera');
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
   /// Releases the resources of this camera.
   @override
   Future<void> dispose() async {
