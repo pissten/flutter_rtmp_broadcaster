@@ -25,6 +25,7 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
+        print("[RIGATTA-SWIFT] open() called. url=\(url) width=\(width) height=\(height) bitrate=\(bitrate)")
         rtmpStream = RTMPStream(connection: rtmpConnection)
         rtmpStream.captureSettings = [
             .sessionPreset: AVCaptureSession.Preset.hd1280x720,
@@ -34,13 +35,15 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
         rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
-        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/{Event_id}_{Startnr}
-        // {Event_id}_{Startnr} is the RTMP app name — there is no separate stream key.
-        // We pass the FULL URL to connect() so HaishinKit can extract the app name from
-        // the path. Then publish("") with an empty stream name, matching how Android's
-        // SrsFlvMuxer.start(url) handles the same URL.
-        self.url = url
-        self.name = ""  // No separate stream key in Rigatta's RTMP setup
+        let uri = URL(string: url)
+        self.name = uri?.pathComponents.last
+        var bits = url.components(separatedBy: "/")
+        bits.removeLast()
+        self.url = bits.joined(separator: "/")
+        print("[RIGATTA-SWIFT] Parsed: connect=\(self.url ?? "nil") publish=\(self.name ?? "nil")")
+        
+        eventSink(["event" : "rtmp_debug",
+                   "errorDescription" : "DEBUG - Full URL: '\(url)' -> Splitted URL: '\(self.url ?? "")', Stream Name: '\(self.name ?? "")'"])
         
         rtmpStream.videoSettings = [
             .width: width,
@@ -68,6 +71,7 @@ public class FlutterRTMPStreaming : NSObject {
                     break
                 }
             }
+                print("[RIGATTA-SWIFT] Calling rtmpConnection.connect(\(self.url ?? ""))")
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
@@ -80,8 +84,10 @@ public class FlutterRTMPStreaming : NSObject {
         }
         print(e)
         
+        print("[RIGATTA-SWIFT] rtmpStatusHandler code=\(code)")
         switch code {
         case RTMPConnection.Code.connectSuccess.rawValue:
+            print("[RIGATTA-SWIFT] connectSuccess — publishing name=\(name ?? "nil")")
             rtmpStream.publish(name)
             retries = 0
             break
@@ -149,6 +155,11 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func addVideoData(buffer: CMSampleBuffer) {
+        struct Once { static var done = false }
+        if !Once.done {
+            print("[RIGATTA-SWIFT] addVideoData: first frame received, rtmpStream=\(rtmpStream != nil ? "OK" : "NIL")")
+            Once.done = true
+        }
         rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
     

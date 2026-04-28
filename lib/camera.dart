@@ -426,6 +426,9 @@ class CameraController extends ValueNotifier<CameraValue> {
     if (_isDisposed || event == null) {
       return;
     }
+    
+    // Print native events for debugging
+    print('NATIVE RTMP EVENT: $event');
 
     // Android: Event {eventType: rtmp_retry, errorDescription: BadName received}
     // iOS: Event {event: rtmp_retry, errorDescription: connection failed rtmpStatus}

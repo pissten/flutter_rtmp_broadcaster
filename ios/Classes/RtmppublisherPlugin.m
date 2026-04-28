@@ -565,8 +565,18 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (_isStreaming && !_isStreamingPaused) {
         CFRetain(sampleBuffer);
         if (output == _captureVideoOutput) {
+            static BOOL loggedVideo = NO;
+            if (!loggedVideo) {
+                NSLog(@"[RIGATTA] First VIDEO frame sent to rtmpStream");
+                loggedVideo = YES;
+            }
             [_rtmpStream addVideoDataWithBuffer:sampleBuffer ];
         } else {
+            static BOOL loggedAudio = NO;
+            if (!loggedAudio) {
+                NSLog(@"[RIGATTA] First AUDIO frame sent to rtmpStream");
+                loggedAudio = YES;
+            }
             [_rtmpStream addAudioDataWithBuffer:sampleBuffer ];
         }
         CFRelease(sampleBuffer);
@@ -783,16 +793,20 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 
 - (void)startVideoStreamingAtUrl:(NSString *)url bitrate:(NSNumber *)bitrate result:(FlutterResult)result {
+    NSLog(@"[RIGATTA] startVideoStreamingAtUrl called. url=%@ bitrate=%@ streamingSize=%.0fx%.0f", url, bitrate, _streamingSize.width, _streamingSize.height);
     if (_isStreaming) {
         _eventSink(@{@"event" : @"error", @"errorDescription" : @"Video is already streaming!"});
     }
     if (!_isStreaming) {
-        if (![self setupWriterForUrl:url ]) {
+        BOOL writerOK = [self setupWriterForUrl:url];
+        NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
+        if (!writerOK) {
             _eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
             return;
         }
     if (_rtmpStream == nil) {
         _rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:_eventSink];
+        NSLog(@"[RIGATTA] FlutterRTMPStreaming created");
     }
     if (bitrate == nil || bitrate == 0) {
             bitrate = [NSNumber numberWithInt:160 * 1000];
@@ -802,6 +816,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         // [self newAudioSample:sampleBuffer];
         [self setStreamingSessionPreset:_streamingPreset];
         
+        NSLog(@"[RIGATTA] Calling openWithUrl width=%.0f height=%.0f bitrate=%d", _streamingSize.width, _streamingSize.height, bitrate.intValue);
         [_rtmpStream openWithUrl:url width: _streamingSize.width height: _streamingSize.height bitrate: bitrate.integerValue];
         _isStreaming = YES;
         _isStreamingPaused = NO;
