@@ -2,9 +2,6 @@
 #if __has_include("rtmp_broadcaster/rtmp_broadcaster-Swift.h")
 #import <rtmp_broadcaster/rtmp_broadcaster-Swift.h>
 #else
-// Support project import fallback if the generated compatibility header
-// is not copied when this plugin is created as a library.
-// https://forums.swift.org/t/swift-static-libraries-dont-copy-generated-objective-c-header/19816
 #import "rtmp_broadcaster-Swift.h"
 #endif
 
@@ -115,8 +112,6 @@ previewPhotoSampleBuffer:(CMSampleBufferRef)previewPhotoSampleBuffer
         return _cameraPosition == AVCaptureDevicePositionBack ? UIImageOrientationUp
         : UIImageOrientationDown;
     } else if (isNearValueABS(0.0, yxAtan)) {
-        return _cameraPosition == AVCaptureDevicePositionBack ? UIImageOrientationDown /*rotate 180* */
-        : UIImageOrientationUp /*do not rotate*/;
     } else if (isNearValue(90.0, yxAtan)) {
         return UIImageOrientationLeft;
     }
@@ -222,6 +217,7 @@ FlutterStreamHandler>
 - (void)startImageStreamWithMessenger:(NSObject<FlutterBinaryMessenger> *)messenger;
 - (void)stopImageStream;
 - (void)captureToFile:(NSString *)filename result:(FlutterResult)result;
+- (void)switchCamera:(FlutterResult)result;
 @end
 
 @implementation FLTCam {
@@ -293,6 +289,73 @@ FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
 
 - (void)stop {
     [_captureSession stopRunning];
+}
+
+- (void)switchCamera:(FlutterResult)result {
+    AVCaptureDevicePosition position = _captureDevice.position;
+    AVCaptureDevicePosition targetPosition = (position == AVCaptureDevicePositionBack) ? AVCaptureDevicePositionFront : AVCaptureDevicePositionBack;
+    
+    AVCaptureDevice *newDevice = nil;
+    AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
+                                                         discoverySessionWithDeviceTypes:@[ AVCaptureDeviceTypeBuiltInWideAngleCamera ]
+                                                         mediaType:AVMediaTypeVideo
+                                                         position:targetPosition];
+    for (AVCaptureDevice *device in discoverySession.devices) {
+        if (device.position == targetPosition) {
+            newDevice = device;
+            break;
+        }
+    }
+    
+    if (newDevice) {
+        NSError *error = nil;
+        AVCaptureDeviceInput *newInput = [AVCaptureDeviceInput deviceInputWithDevice:newDevice error:&error];
+        if (error) {
+            result(getFlutterError(error));
+            return;
+        }
+        
+        [_captureSession beginConfiguration];
+        
+        for (AVCaptureConnection *connection in [_captureVideoOutput connections]) {
+            [_captureSession removeConnection:connection];
+        }
+        
+        [_captureSession removeInput:_captureVideoInput];
+        
+        if ([_captureSession canAddInput:newInput]) {
+            [_captureSession addInputWithNoConnections:newInput];
+            _captureVideoInput = newInput;
+            _captureDevice = newDevice;
+            
+            AVCaptureConnection *newConnection = [AVCaptureConnection connectionWithInputPorts:_captureVideoInput.ports output:_captureVideoOutput];
+            newConnection.videoOrientation = AVCaptureVideoOrientationPortrait;
+            if (targetPosition == AVCaptureDevicePositionFront) {
+                newConnection.videoMirrored = YES;
+            }
+            
+            if ([_captureSession canAddConnection:newConnection]) {
+                [_captureSession addConnection:newConnection];
+            }
+        } else {
+            [_captureSession addInputWithNoConnections:_captureVideoInput];
+            AVCaptureConnection *oldConnection = [AVCaptureConnection connectionWithInputPorts:_captureVideoInput.ports output:_captureVideoOutput];
+            oldConnection.videoOrientation = AVCaptureVideoOrientationPortrait;
+            if (position == AVCaptureDevicePositionFront) {
+                oldConnection.videoMirrored = YES;
+            }
+            [_captureSession addConnection:oldConnection];
+            
+            result([FlutterError errorWithCode:@"Error" message:@"Could not add new camera input" details:nil]);
+            [_captureSession commitConfiguration];
+            return;
+        }
+        
+        [_captureSession commitConfiguration];
+        result(nil);
+    } else {
+        result([FlutterError errorWithCode:@"Error" message:@"No other camera found" details:nil]);
+    }
 }
 
 - (void)captureToFile:(NSString *)path result:(FlutterResult)result {
@@ -728,9 +791,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             _eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
             return;
         }
-        
-        _rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink: _eventSink];
-        if (bitrate == nil || bitrate == 0) {
+    if (_rtmpStream == nil) {
+        _rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:_eventSink];
+    }
+    if (bitrate == nil || bitrate == 0) {
             bitrate = [NSNumber numberWithInt:160 * 1000];
         }
         
@@ -812,7 +876,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         
         if (_isStreaming) {
             _isStreaming = NO;
-            [_rtmpStream close];
+//            [_rtmpStream close];
         }
         result(nil);
     }
@@ -828,7 +892,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else {
         if (_isStreaming) {
             _isStreaming = NO;
-            [_rtmpStream close];
+//            [_rtmpStream close];
         }
         result(nil);
     }
@@ -1008,12 +1072,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     dispatch_queue_t _dispatchQueue;
 }
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
+    NSLog(@"RTMP: RtmppublisherPlugin registerWithRegistrar called");
     FlutterMethodChannel *channel =
     [FlutterMethodChannel methodChannelWithName:@"plugins.flutter.io/rtmp_publisher"
                                 binaryMessenger:[registrar messenger]];
     RtmppublisherPlugin *instance = [[RtmppublisherPlugin alloc] initWithRegistry:[registrar textures]
                                                                         messenger:[registrar messenger]];
     [registrar addMethodCallDelegate:instance channel:channel];
+    NSLog(@"RTMP: RtmppublisherPlugin registerWithRegistrar completed");
 }
 
 - (instancetype)initWithRegistry:(NSObject<FlutterTextureRegistry> *)registry
@@ -1110,6 +1176,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else if ([@"stopImageStream" isEqualToString:call.method]) {
         [_camera stopImageStream];
         result(nil);
+    } else if ([@"switchCamera" isEqualToString:call.method]) {
+        [_camera switchCamera:result];
     } else if ([@"pauseVideoRecording" isEqualToString:call.method]) {
         [_camera pauseVideoRecording];
         result(nil);

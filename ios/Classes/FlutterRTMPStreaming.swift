@@ -34,13 +34,14 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
         rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
-        let uri = URL(string: url)
-        self.name = uri?.pathComponents.last
-        var bits = url.components(separatedBy: "/")
-        bits.removeLast()
-        self.url = bits.joined(separator: "/")
+        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/{Event_id}_{Startnr}
+        // {Event_id}_{Startnr} is the RTMP app name — there is no separate stream key.
+        // We pass the FULL URL to connect() so HaishinKit can extract the app name from
+        // the path. Then publish("") with an empty stream name, matching how Android's
+        // SrsFlvMuxer.start(url) handles the same URL.
+        self.url = url
+        self.name = ""  // No separate stream key in Rigatta's RTMP setup
         
-        // TODO: Da correggere
         rtmpStream.videoSettings = [
             .width: width,
             .height: height,
@@ -55,19 +56,19 @@ public class FlutterRTMPStreaming : NSObject {
         self.retries = 0
         // Run this on the ui thread.
         DispatchQueue.main.async {
-            if let orientation = DeviceUtil.videoOrientation(by:  UIApplication.shared.statusBarOrientation) {
+            if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
                 self.rtmpStream.orientation = orientation
                 print(String(format:"Orient %d", orientation.rawValue))
                 switch (orientation) {
                 case .landscapeLeft, .landscapeRight:
-                    self.rtmpStream.videoSettings[.width] = width;
-                    self.rtmpStream.videoSettings[.height] = height;
-                    break;
+                    self.rtmpStream.videoSettings[.width] = width
+                    self.rtmpStream.videoSettings[.height] = height
+                    break
                 default:
-                    break;
+                    break
                 }
             }
-            self.rtmpConnection.connect(self.url ?? "frog")
+            self.rtmpConnection.connect(self.url ?? "")
         }
     }
     
@@ -111,12 +112,11 @@ public class FlutterRTMPStreaming : NSObject {
                        "errorDescription" : "rtmp disconnected"])
             return
         }
-        retries+=1
+        retries += 1
         Thread.sleep(forTimeInterval: pow(2.0, Double(retries)))
         rtmpConnection.connect(url!)
         eventSink(["event" : "rtmp_retry",
                    "errorDescription" : "rtmp disconnected"])
-        
     }
     
     @objc
@@ -130,10 +130,9 @@ public class FlutterRTMPStreaming : NSObject {
     }
     
     @objc
-    public func isPaused() -> Bool{
+    public func isPaused() -> Bool {
         return rtmpStream.paused
     }
-    
     
     @objc
     public func getStreamStatistics() -> NSDictionary {
@@ -145,40 +144,17 @@ public class FlutterRTMPStreaming : NSObject {
             "fps": (rtmpStream.captureSettings[.fps]! as! NSNumber).floatValue,
             "orientation": rtmpStream.orientation.rawValue
         ]
-        //ret["cacheSize"] = rtmpConnection.bandWidth
-        //ret["sentAudioFrames"] = rtmpCamera!!.sentAudioFrames
-        //        ret["sentVideoFrames"] = rtmpCamera!!.sentVideoFrames
-        //if (rtmpCamera!!.droppedAudioFrames == null) {
-        //ret["droppedAudioFrames"] = 0
-        //} else {
-        //ret["droppedAudioFrames"] = rtmpCamera!!.droppedAudioFrames
-        //}
-        //ret["droppedVideoFrames"] = rtmpCamera!!.droppedVideoFrames
-        //ret["isAudioMuted"] = rtmpCamera!!.isAudioMuted
         return ret
     }
     
     @objc
     public func addVideoData(buffer: CMSampleBuffer) {
-        if let description = CMSampleBufferGetFormatDescription(buffer) {
-            let dimensions = CMVideoFormatDescriptionGetDimensions(description)
-            rtmpStream.videoSettings = [
-                .width: dimensions.width,
-                .height: dimensions.height,
-                .profileLevel: kVTProfileLevel_H264_Baseline_AutoLevel,
-                .maxKeyFrameIntervalDuration: 2,
-                .bitrate: 1200 * 1024
-            ]
-            rtmpStream.captureSettings = [
-                .fps: 24
-            ]
-        }
-        rtmpStream.appendSampleBuffer( buffer, withType: .video)
+        rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
     
     @objc
     public func addAudioData(buffer: CMSampleBuffer) {
-        rtmpStream.appendSampleBuffer( buffer, withType: .audio)
+        rtmpStream.appendSampleBuffer(buffer, withType: .audio)
     }
     
     @objc
@@ -186,7 +162,8 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpConnection.close()
     }
     
-    // Zoom methods
+    // MARK: - Zoom methods (Rigatta addition)
+    
     @objc
     public func getMinZoomLevel() -> Double {
         return 1.0
@@ -233,12 +210,10 @@ class MyRTMPStreamQoSDelagate: RTMPStreamDelegate {
         stream.videoSettings[.bitrate] = newVideoBitrate
     }
     
-    
-    // detect upload insufficent BandWidth
-    func didPublishInsufficientBW(_ stream:RTMPStream, withConnection:RTMPConnection) {
+    func didPublishInsufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
         guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
         
-        var         newVideoBitrate = UInt32(videoBitrate / 2)
+        var newVideoBitrate = UInt32(videoBitrate / 2)
         if newVideoBitrate < minBitrate {
             newVideoBitrate = minBitrate
         }
