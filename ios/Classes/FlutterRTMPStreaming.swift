@@ -132,14 +132,20 @@ public class FlutterRTMPStreaming : NSObject {
             os_log("%s", notification.name.rawValue)
         }
         guard retries <= 3 else {
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) }
+            DispatchQueue.main.async { 
+                guard let sink = self.eventSink else { return }
+                sink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) 
+            }
             return
         }
         retries += 1
         DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
             self.rtmpConnection.connect(self.url!)
         }
-        DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) }
+        DispatchQueue.main.async { 
+            guard let sink = self.eventSink else { return }
+            sink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) 
+        }
     }
     
     @objc
