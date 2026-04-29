@@ -43,6 +43,7 @@ public class FlutterRTMPStreaming : NSObject {
         let baseUrl = parts.joined(separator: "/")
         self.url = baseUrl.isEmpty ? url : baseUrl
         self.name = streamName
+        print("[RIGATTA-SWIFT] URL split: original='\(url)' base='\(self.url ?? "NIL")' name='\(self.name ?? "NIL")'")
         
         rtmpStream.videoSettings = [
             .width: width,
