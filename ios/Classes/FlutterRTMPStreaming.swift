@@ -39,14 +39,31 @@ public class FlutterRTMPStreaming : NSObject {
         self.name = streamName
         print("[RIGATTA-SWIFT] URL split: original='\(url)' base='\(self.url ?? "NIL")' name='\(self.name ?? "NIL")'")
         
-        // MINIMAL TEST: Skip all video settings for now, just test connection
-        print("[RIGATTA-SWIFT] MINIMAL TEST: Skipping video settings, testing connection only")
+        rtmpStream.videoSettings = [
+            .width: width,
+            .height: height,
+            .maxKeyFrameIntervalDuration: 2,
+            .bitrate: bitrate
+        ]
+        rtmpStream.captureSettings = [
+            .fps: 30
+        ]
         rtmpStream.delegate = myDelegate
         self.retries = 0
-        
-        // Test connection immediately without video preparation
+        // Run this on the ui thread.
         DispatchQueue.main.async {
-            print("[RIGATTA-SWIFT] MINIMAL TEST: Starting RTMP connection")
+            if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
+                self.rtmpStream.orientation = orientation
+                print(String(format:"Orient %d", orientation.rawValue))
+                switch (orientation) {
+                case .landscapeLeft, .landscapeRight:
+                    self.rtmpStream.videoSettings[.width] = width
+                    self.rtmpStream.videoSettings[.height] = height
+                    break
+                default:
+                    break
+                }
+            }
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
@@ -145,16 +162,12 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func addVideoData(buffer: CMSampleBuffer) {
-        // MINIMAL TEST: Skip all video data to isolate connection issue
-        print("[RIGATTA-SWIFT] MINIMAL TEST: Skipping video data completely")
-        return
+        rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
     
     @objc
     public func addAudioData(buffer: CMSampleBuffer) {
-        // MINIMAL TEST: Skip all audio data to isolate connection issue
-        print("[RIGATTA-SWIFT] MINIMAL TEST: Skipping audio data completely")
-        return
+        rtmpStream.appendSampleBuffer(buffer, withType: .audio)
     }
     
     @objc
