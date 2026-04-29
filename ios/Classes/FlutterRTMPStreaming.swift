@@ -15,7 +15,8 @@ public class FlutterRTMPStreaming : NSObject {
     private var url: String? = nil
     private var name: String? = nil
     private var retries: Int = 0
-    private let eventSink: FlutterEventSink
+    private var eventSink: FlutterEventSink?
+    private var isStreaming: Bool = false
     private let myDelegate = MyRTMPStreamQoSDelagate()
     
     @objc
@@ -56,6 +57,10 @@ public class FlutterRTMPStreaming : NSObject {
         ]
         rtmpStream.delegate = myDelegate
         self.retries = 0
+        
+        // Android-style: Prepare streaming first, then connect
+        print("[RIGATTA-SWIFT] Preparing streaming settings before connection")
+        
         // Run this on the ui thread.
         DispatchQueue.main.async {
             if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
@@ -70,7 +75,12 @@ public class FlutterRTMPStreaming : NSObject {
                     break
                 }
             }
-            self.rtmpConnection.connect(self.url ?? "")
+            
+            // Small delay to ensure video/audio pipeline is ready
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                print("[RIGATTA-SWIFT] Starting RTMP connection after preparation")
+                self.rtmpConnection.connect(self.url ?? "")
+            }
         }
     }
 
@@ -86,7 +96,8 @@ public class FlutterRTMPStreaming : NSObject {
         case RTMPConnection.Code.connectSuccess.rawValue:
             print("[RIGATTA-SWIFT] rtmpStatusHandler: connectSuccess, publishing name='\(name ?? "NIL")'")
             rtmpStream.publish(name)
-            print("[RIGATTA-SWIFT] rtmpStatusHandler: publish() completed successfully")
+            self.isStreaming = true
+            print("[RIGATTA-SWIFT] rtmpStatusHandler: publish() completed successfully, isStreaming=true")
             retries = 0
             DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
             break
@@ -158,9 +169,9 @@ public class FlutterRTMPStreaming : NSObject {
             Once.done = true
         }
         
-        // Only append video if RTMP connection is ready and publishing
-        guard rtmpConnection.connected && rtmpStream != nil else {
-            print("[RIGATTA-SWIFT] addVideoData: skipping - RTMP not ready")
+        // Only append video if RTMP connection is ready and streaming
+        guard rtmpConnection.connected && rtmpStream != nil && isStreaming else {
+            print("[RIGATTA-SWIFT] addVideoData: skipping - RTMP not ready or not streaming")
             return
         }
         
@@ -169,9 +180,9 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func addAudioData(buffer: CMSampleBuffer) {
-        // Only append audio if RTMP connection is ready and publishing
-        guard rtmpConnection.connected && rtmpStream != nil else {
-            print("[RIGATTA-SWIFT] addAudioData: skipping - RTMP not ready")
+        // Only append audio if RTMP connection is ready and streaming
+        guard rtmpConnection.connected && rtmpStream != nil && isStreaming else {
+            print("[RIGATTA-SWIFT] addAudioData: skipping - RTMP not ready or not streaming")
             return
         }
         
@@ -180,6 +191,8 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func close() {
+        isStreaming = false
+        print("[RIGATTA-SWIFT] close(): stopping streaming, isStreaming=false")
         rtmpConnection.close()
     }
     
