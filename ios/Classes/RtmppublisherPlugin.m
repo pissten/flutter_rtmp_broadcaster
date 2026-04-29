@@ -966,7 +966,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSError *error = nil;
     NSURL *outputURL;
     if (path != nil) {
-        outputURL = [NSURL fileURLWithPath:path];
+        outputURL = [NSURL URLWithString:path];
     } else {
         return NO;
     }
