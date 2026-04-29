@@ -18,7 +18,7 @@ public class FlutterRTMPStreaming : NSObject {
     private var eventSink: FlutterEventSink?
     private var isStreaming: Bool = false
     private let myDelegate = MyRTMPStreamQoSDelagate()
-    
+
     @objc
     public init(sink: @escaping FlutterEventSink) {
         eventSink = sink
@@ -205,37 +205,5 @@ public class FlutterRTMPStreaming : NSObject {
         } catch {
             print("Error setting zoom: \(error)")
         }
-    }
-}
-
-
-class MyRTMPStreamQoSDelagate: RTMPStreamDelegate {
-    let minBitrate: UInt32 = 300 * 1024
-    let maxBitrate: UInt32 = 2500 * 1024
-    let incrementBitrate: UInt32 = 512 * 1024
-    
-    func didPublishSufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
-        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
-        
-        var newVideoBitrate = videoBitrate + incrementBitrate
-        if newVideoBitrate > maxBitrate {
-            newVideoBitrate = maxBitrate
-        }
-        print("didPublishSufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
-        stream.videoSettings[.bitrate] = newVideoBitrate
-    }
-    
-    func didPublishInsufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
-        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
-        
-        var newVideoBitrate = UInt32(videoBitrate / 2)
-        if newVideoBitrate < minBitrate {
-            newVideoBitrate = minBitrate
-        }
-        print("didPublishInsufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
-        stream.videoSettings[.bitrate] = newVideoBitrate
-    }
-    
-    func clear() {
     }
 }
