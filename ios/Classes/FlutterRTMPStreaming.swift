@@ -26,13 +26,32 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
-        print("[RIGATTA-SWIFT] TEST 1: Kun RTMPConnection uten RTMPStream")
+        print("[RIGATTA-SWIFT] TEST 2: Start streaming UTEN video/audio data")
         
-        // Test 1: Kun connection, ingen stream
-        self.url = url
-        print("[RIGATTA-SWIFT] TEST 1: Lager RTMPConnection...")
+        rtmpStream = RTMPStream(connection: rtmpConnection)
         
-        // Legg til status handler for å se events
+        // Split URL for go2rtc compatibility
+        var parts = url.components(separatedBy: "/")
+        let streamName = parts.last ?? ""
+        parts.removeLast()
+        let baseUrl = parts.joined(separator: "/")
+        self.url = baseUrl.isEmpty ? url : baseUrl
+        self.name = streamName
+        print("[RIGATTA-SWIFT] URL split: original='\(url)' base='\(self.url ?? "NIL")' name='\(self.name ?? "NIL")'")
+        
+        // Sett video settings (men ikke send data)
+        rtmpStream.videoSettings = [
+            .width: width,
+            .height: height,
+            .maxKeyFrameIntervalDuration: 2,
+            .bitrate: bitrate
+        ]
+        rtmpStream.captureSettings = [
+            .fps: 30
+        ]
+        rtmpStream.delegate = myDelegate
+        
+        // Legg til status handler
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(rtmpStatusHandler(_:)),
@@ -40,12 +59,17 @@ public class FlutterRTMPStreaming : NSObject {
             object: nil
         )
         
-        print("[RIGATTA-SWIFT] TEST 1: Klargjør for connect...")
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(rtmpStatusHandler(_:)),
+            name: NSNotification.Name.RTMPStream,
+            object: nil
+        )
+        
         self.retries = 0
         
-        // Test connection uten stream
         DispatchQueue.main.async {
-            print("[RIGATTA-SWIFT] TEST 1: Starter connect til: \(self.url ?? "NIL")")
+            print("[RIGATTA-SWIFT] TEST 2: Starter connect...")
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
@@ -57,38 +81,32 @@ public class FlutterRTMPStreaming : NSObject {
         guard let data: ASObject = e.data as? ASObject, let code: String = data["code"] as? String else {
             return
         }
-        print(e)
+        
+        print("[RIGATTA-SWIFT] RTMP Event: \(code)")
+        
         switch code {
-        case RTMPConnection.Code.connectSuccess.rawValue:
-            print("[RIGATTA-SWIFT] rtmpStatusHandler: connectSuccess, publishing name='\(name ?? "NIL")'")
-            rtmpStream.publish(name)
-            self.isStreaming = true
-            print("[RIGATTA-SWIFT] rtmpStatusHandler: publish() completed successfully, isStreaming=true")
-            retries = 0
-            DispatchQueue.main.async { 
-            guard let sink = self.eventSink else { return }
-            sink(["event" : "rtmp_connected", "errorDescription" : ""]) 
-        }
-            break
-        case RTMPConnection.Code.connectFailed.rawValue, RTMPConnection.Code.connectClosed.rawValue:
-            guard retries <= 3 else {
-                DispatchQueue.main.async { 
-                guard let sink = self.eventSink else { return }
-                sink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) 
+        case "NetConnection.Connect.Success":
+            print("[RIGATTA-SWIFT] ✅ Connection successful!")
+            print("[RIGATTA-SWIFT] Starter publish til stream: \(self.name ?? "NIL")")
+            DispatchQueue.main.async {
+                self.rtmpStream.publish(self.name ?? "")
             }
-                return
-            }
-            retries += 1
-            DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
-                self.rtmpConnection.connect(self.url!)
-            }
-            DispatchQueue.main.async { 
-                guard let sink = self.eventSink else { return }
-                sink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) 
-            }
-            break
+            
+        case "NetConnection.Connect.Failed":
+            print("[RIGATTA-SWIFT] ❌ Connection failed!")
+            
+        case "NetConnection.Connect.Closed":
+            print("[RIGATTA-SWIFT] 🔌 Connection closed")
+            
+        case "NetStream.Publish.Start":
+            print("[RIGATTA-SWIFT] 🎥 Stream started publishing!")
+            print("[RIGATTA-SWIFT] ⚠️ IKKE send video/audio data - tester om dette krasjer")
+            
+        case "NetStream.Publish.Failed":
+            print("[RIGATTA-SWIFT] ❌ Stream publish failed!")
+            
         default:
-            break
+            print("[RIGATTA-SWIFT] ℹ️ Other event: \(code)")
         }
     }
     
