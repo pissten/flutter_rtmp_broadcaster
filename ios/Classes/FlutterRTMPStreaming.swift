@@ -48,7 +48,6 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpStream.videoSettings = [
             .width: width,
             .height: height,
-            .profileLevel: kVTProfileLevel_H264_Baseline_AutoLevel,
             .maxKeyFrameIntervalDuration: 2,
             .bitrate: bitrate
         ]
@@ -85,7 +84,9 @@ public class FlutterRTMPStreaming : NSObject {
         print(e)
         switch code {
         case RTMPConnection.Code.connectSuccess.rawValue:
+            print("[RIGATTA-SWIFT] rtmpStatusHandler: connectSuccess, publishing name='\(name ?? "NIL")'")
             rtmpStream.publish(name)
+            print("[RIGATTA-SWIFT] rtmpStatusHandler: publish() completed successfully")
             retries = 0
             DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
             break
