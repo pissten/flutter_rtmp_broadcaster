@@ -26,44 +26,26 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
-        rtmpStream = RTMPStream(connection: rtmpConnection)
+        print("[RIGATTA-SWIFT] TEST 1: Kun RTMPConnection uten RTMPStream")
         
-        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/Event1_DEV-001
-        // go2rtc requires: connect("rtmp://host:1935/app") + publish("streamName")
-        // Split on last "/" — base URL to connect(), stream name to publish()
-        var parts = url.components(separatedBy: "/")
-        let streamName = parts.last ?? ""
-        parts.removeLast()
-        let baseUrl = parts.joined(separator: "/")
-        self.url = baseUrl.isEmpty ? url : baseUrl
-        self.name = streamName
-        print("[RIGATTA-SWIFT] URL split: original='\(url)' base='\(self.url ?? "NIL")' name='\(self.name ?? "NIL")'")
+        // Test 1: Kun connection, ingen stream
+        self.url = url
+        print("[RIGATTA-SWIFT] TEST 1: Lager RTMPConnection...")
         
-        rtmpStream.videoSettings = [
-            .width: width,
-            .height: height,
-            .maxKeyFrameIntervalDuration: 2,
-            .bitrate: bitrate
-        ]
-        rtmpStream.captureSettings = [
-            .fps: 30
-        ]
-        rtmpStream.delegate = myDelegate
+        // Legg til status handler for å se events
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(rtmpStatusHandler(_:)),
+            name: NSNotification.Name.RTMPConnection,
+            object: nil
+        )
+        
+        print("[RIGATTA-SWIFT] TEST 1: Klargjør for connect...")
         self.retries = 0
-        // Run this on the ui thread.
+        
+        // Test connection uten stream
         DispatchQueue.main.async {
-            if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
-                self.rtmpStream.orientation = orientation
-                print(String(format:"Orient %d", orientation.rawValue))
-                switch (orientation) {
-                case .landscapeLeft, .landscapeRight:
-                    self.rtmpStream.videoSettings[.width] = width
-                    self.rtmpStream.videoSettings[.height] = height
-                    break
-                default:
-                    break
-                }
-            }
+            print("[RIGATTA-SWIFT] TEST 1: Starter connect til: \(self.url ?? "NIL")")
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
