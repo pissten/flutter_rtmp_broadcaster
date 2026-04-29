@@ -157,11 +157,24 @@ public class FlutterRTMPStreaming : NSObject {
             print("[RIGATTA-SWIFT] addVideoData: first frame received, rtmpStream=\(rtmpStream != nil ? "OK" : "NIL")")
             Once.done = true
         }
+        
+        // Only append video if RTMP connection is ready and publishing
+        guard rtmpConnection.connected() && rtmpStream != nil else {
+            print("[RIGATTA-SWIFT] addVideoData: skipping - RTMP not ready")
+            return
+        }
+        
         rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
     
     @objc
     public func addAudioData(buffer: CMSampleBuffer) {
+        // Only append audio if RTMP connection is ready and publishing
+        guard rtmpConnection.connected() && rtmpStream != nil else {
+            print("[RIGATTA-SWIFT] addAudioData: skipping - RTMP not ready")
+            return
+        }
+        
         rtmpStream.appendSampleBuffer(buffer, withType: .audio)
     }
     
