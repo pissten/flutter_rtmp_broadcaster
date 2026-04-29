@@ -99,18 +99,27 @@ public class FlutterRTMPStreaming : NSObject {
             self.isStreaming = true
             print("[RIGATTA-SWIFT] rtmpStatusHandler: publish() completed successfully, isStreaming=true")
             retries = 0
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
+            DispatchQueue.main.async { 
+            guard let sink = self.eventSink else { return }
+            sink(["event" : "rtmp_connected", "errorDescription" : ""]) 
+        }
             break
         case RTMPConnection.Code.connectFailed.rawValue, RTMPConnection.Code.connectClosed.rawValue:
             guard retries <= 3 else {
-                DispatchQueue.main.async { self.eventSink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) }
+                DispatchQueue.main.async { 
+                guard let sink = self.eventSink else { return }
+                sink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) 
+            }
                 return
             }
             retries += 1
             DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
                 self.rtmpConnection.connect(self.url!)
             }
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) }
+            DispatchQueue.main.async { 
+                guard let sink = self.eventSink else { return }
+                sink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) 
+            }
             break
         default:
             break
