@@ -34,13 +34,16 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
         rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
-        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/{Event_id}_{Startnr}
-        // {Event_id}_{Startnr} is the RTMP app name — there is no separate stream key.
-        // We pass the FULL URL to connect() so HaishinKit can extract the app name from
-        // the path. Then publish("") with an empty stream name, matching how Android's
-        // SrsFlvMuxer.start(url) handles the same URL.
-        self.url = url
-        self.name = ""  // No separate stream key in Rigatta's RTMP setup
+        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/Event1_DEV-001
+        // go2rtc requires: connect("rtmp://host:1935/app") + publish("streamName")
+        // Split: base = everything up to last "/", name = last path segment
+        if let lastSlash = url.lastIndex(of: "/") {
+            self.url = String(url[url.startIndex..<lastSlash])
+            self.name = String(url[url.index(after: lastSlash)...])
+        } else {
+            self.url = url
+            self.name = ""
+        }
         
         rtmpStream.videoSettings = [
             .width: width,
