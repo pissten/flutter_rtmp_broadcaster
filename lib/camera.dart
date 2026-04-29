@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:developer';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -427,8 +428,7 @@ class CameraController extends ValueNotifier<CameraValue> {
       return;
     }
     
-    // Print native events for debugging
-    print('NATIVE RTMP EVENT: $event');
+    log('NATIVE EVENT: $event', name: 'RTMP');
 
     // Android: Event {eventType: rtmp_retry, errorDescription: BadName received}
     // iOS: Event {event: rtmp_retry, errorDescription: connection failed rtmpStatus}
@@ -451,12 +451,15 @@ class CameraController extends ValueNotifier<CameraValue> {
             event: uniEvent);
         break;
       case 'rtmp_connected':
+        log('✅ CONNECTED', name: 'RTMP');
         value = value.copyWith(event: uniEvent);
         break;
       case 'rtmp_retry':
+        log('🔁 RETRY: $errorDescription', name: 'RTMP');
         value = value.copyWith(event: uniEvent);
         break;
       case 'rtmp_stopped':
+        log('🛑 STOPPED: $errorDescription', name: 'RTMP');
         value = value.copyWith(isStreamingVideoRtmp: false, event: uniEvent);
         break;
       case 'rotation_update':

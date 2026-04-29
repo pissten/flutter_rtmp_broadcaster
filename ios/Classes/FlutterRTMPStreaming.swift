@@ -84,18 +84,18 @@ public class FlutterRTMPStreaming : NSObject {
         case RTMPConnection.Code.connectSuccess.rawValue:
             rtmpStream.publish(name)
             retries = 0
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
             break
         case RTMPConnection.Code.connectFailed.rawValue, RTMPConnection.Code.connectClosed.rawValue:
             guard retries <= 3 else {
-                eventSink(["event" : "error",
-                           "errorDescription" : "connection failed " + e.type.rawValue])
+                DispatchQueue.main.async { self.eventSink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) }
                 return
             }
             retries += 1
-            Thread.sleep(forTimeInterval: pow(2.0, Double(retries)))
-            rtmpConnection.connect(url!)
-            eventSink(["event" : "rtmp_retry",
-                       "errorDescription" : "connection failed " + e.type.rawValue])
+            DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
+                self.rtmpConnection.connect(self.url!)
+            }
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) }
             break
         default:
             break
@@ -108,15 +108,14 @@ public class FlutterRTMPStreaming : NSObject {
             os_log("%s", notification.name.rawValue)
         }
         guard retries <= 3 else {
-            eventSink(["event" : "rtmp_stopped",
-                       "errorDescription" : "rtmp disconnected"])
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) }
             return
         }
         retries += 1
-        Thread.sleep(forTimeInterval: pow(2.0, Double(retries)))
-        rtmpConnection.connect(url!)
-        eventSink(["event" : "rtmp_retry",
-                   "errorDescription" : "rtmp disconnected"])
+        DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
+            self.rtmpConnection.connect(self.url!)
+        }
+        DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) }
     }
     
     @objc
