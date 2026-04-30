@@ -30,11 +30,6 @@ public class FlutterRTMPStreaming : NSObject {
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
         rtmpStream = RTMPStream(connection: rtmpConnection)
-        rtmpStream.captureSettings = [
-            .sessionPreset: AVCaptureSession.Preset.hd1280x720,
-            .continuousAutofocus: true,
-            .continuousExposure: true
-        ]
         rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
         rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
@@ -55,9 +50,6 @@ public class FlutterRTMPStreaming : NSObject {
             .profileLevel: kVTProfileLevel_H264_Baseline_AutoLevel,
             .maxKeyFrameIntervalDuration: 2,
             .bitrate: bitrate
-        ]
-        rtmpStream.captureSettings = [
-            .fps: 30
         ]
         rtmpStream.delegate = myDelegate
         self.retries = 0
