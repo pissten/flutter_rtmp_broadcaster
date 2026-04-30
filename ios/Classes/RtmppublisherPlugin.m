@@ -798,37 +798,37 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         _eventSink(@{@"event" : @"error", @"errorDescription" : @"Video is already streaming!"});
         return;
     }
-    BOOL writerOK = [self setupWriterForUrl:url];
-    NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
-    if (!writerOK) {
-        _eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
-        return;
-    }
-    if (_rtmpStream == nil) {
-        _rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:_eventSink];
-        NSLog(@"[RIGATTA] FlutterRTMPStreaming created");
-    }
     if (bitrate == nil || [bitrate isEqualToNumber:@0]) {
         bitrate = [NSNumber numberWithInt:160 * 1000];
     }
+    // Return to Flutter immediately — ALL heavy work (AVCaptureSession + RTMP) runs async
+    result(nil);
     _isStreaming = YES;
     _isStreamingPaused = NO;
     _videoTimeOffset = CMTimeMake(0, 1);
     _audioTimeOffset = CMTimeMake(0, 1);
     _videoIsDisconnected = NO;
     _audioIsDisconnected = NO;
-    // Return to Flutter immediately — AVCaptureSession preset change and RTMP connect run async
-    result(nil);
     NSNumber *bitrateCapture = bitrate;
     NSString *urlCapture = url;
-    CGSize sizeCapture = _streamingSize;
-    NSString *presetCapture = _streamingPreset;
-    FlutterRTMPStreaming *rtmpCapture = _rtmpStream;
+    ResolutionPreset presetCapture = _streamingPreset;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        NSLog(@"[RIGATTA] Calling setStreamingSessionPreset async");
+        NSLog(@"[RIGATTA] setupWriterForUrl async start");
+        BOOL writerOK = [self setupWriterForUrl:urlCapture];
+        NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
+        if (!writerOK) {
+            self->_eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
+            self->_isStreaming = NO;
+            return;
+        }
+        if (self->_rtmpStream == nil) {
+            self->_rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:self->_eventSink];
+            NSLog(@"[RIGATTA] FlutterRTMPStreaming created");
+        }
         [self setStreamingSessionPreset:presetCapture];
+        CGSize sizeCapture = self->_streamingSize;
         NSLog(@"[RIGATTA] Calling openWithUrl width=%.0f height=%.0f bitrate=%d", sizeCapture.width, sizeCapture.height, bitrateCapture.intValue);
-        [rtmpCapture openWithUrl:urlCapture width:sizeCapture.width height:sizeCapture.height bitrate:bitrateCapture.integerValue];
+        [self->_rtmpStream openWithUrl:urlCapture width:sizeCapture.width height:sizeCapture.height bitrate:bitrateCapture.integerValue];
     });
 }
 
