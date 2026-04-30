@@ -280,6 +280,12 @@ FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
     [_motionManager startAccelerometerUpdates];
     
     [self setCaptureSessionPreset:_resolutionPreset];
+    
+    // Setup audio at init time so session doesn't need reconfiguration when streaming starts
+    if (_enableAudio) {
+        [self setUpCaptureSessionForAudio];
+    }
+    
     return self;
 }
 
@@ -1053,31 +1059,28 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)setUpCaptureSessionForAudio {
     NSError *error = nil;
-    // Create a device input with the device and add it to the session.
-    // Setup the audio input.
     AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
     AVCaptureDeviceInput *audioInput = [AVCaptureDeviceInput deviceInputWithDevice:audioDevice
                                                                              error:&error];
     if (error) {
         _eventSink(@{@"event" : @"error", @"errorDescription" : error.description});
+        return;
     }
-    // Setup the audio output.
     _audioOutput = [[AVCaptureAudioDataOutput alloc] init];
     
+    [_captureSession beginConfiguration];
     if ([_captureSession canAddInput:audioInput]) {
         [_captureSession addInput:audioInput];
-        
         if ([_captureSession canAddOutput:_audioOutput]) {
             [_captureSession addOutput:_audioOutput];
             _isAudioSetup = YES;
         } else {
-            _eventSink(@{
-                @"event" : @"error",
-                @"errorDescription" : @"Unable to add Audio input/output to session capture"
-                       });
+            _eventSink(@{@"event" : @"error",
+                         @"errorDescription" : @"Unable to add Audio input/output to session capture"});
             _isAudioSetup = NO;
         }
     }
+    [_captureSession commitConfiguration];
 }
 @end
 
