@@ -280,12 +280,6 @@ FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
     [_motionManager startAccelerometerUpdates];
     
     [self setCaptureSessionPreset:_resolutionPreset];
-    
-    // Setup audio at init time so session doesn't need reconfiguration when streaming starts
-    if (_enableAudio) {
-        [self setUpCaptureSessionForAudio];
-    }
-    
     return self;
 }
 
