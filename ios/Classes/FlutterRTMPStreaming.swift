@@ -34,11 +34,12 @@ public class FlutterRTMPStreaming : NSObject {
         rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
         // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/Event1_DEV-001
-        // go2rtc requires: connect("rtmp://host:1935/app") + publish("streamName")
-        // Split: base = everything up to last "/", name = last path segment
-        if let lastSlash = url.lastIndex(of: "/") {
-            self.url = String(url[url.startIndex..<lastSlash])
-            self.name = String(url[url.index(after: lastSlash)...])
+        // go2rtc requires: connect("rtmp://host:1935") + publish("app/streamName")
+        // Use URL components for safe parsing
+        if let parsedUrl = URL(string: url), let host = parsedUrl.host, let port = parsedUrl.port {
+            self.url = "rtmp://\(host):\(port)"
+            let path = parsedUrl.path
+            self.name = path.hasPrefix("/") ? String(path.dropFirst()) : path
         } else {
             self.url = url
             self.name = ""
