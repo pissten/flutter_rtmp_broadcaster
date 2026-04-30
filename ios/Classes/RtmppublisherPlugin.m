@@ -796,36 +796,40 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSLog(@"[RIGATTA] startVideoStreamingAtUrl called. url=%@ bitrate=%@ streamingSize=%.0fx%.0f", url, bitrate, _streamingSize.width, _streamingSize.height);
     if (_isStreaming) {
         _eventSink(@{@"event" : @"error", @"errorDescription" : @"Video is already streaming!"});
+        return;
     }
-    if (!_isStreaming) {
-        BOOL writerOK = [self setupWriterForUrl:url];
-        NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
-        if (!writerOK) {
-            _eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
-            return;
-        }
+    BOOL writerOK = [self setupWriterForUrl:url];
+    NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
+    if (!writerOK) {
+        _eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
+        return;
+    }
     if (_rtmpStream == nil) {
         _rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:_eventSink];
         NSLog(@"[RIGATTA] FlutterRTMPStreaming created");
     }
-    if (bitrate == nil || bitrate == 0) {
-            bitrate = [NSNumber numberWithInt:160 * 1000];
-        }
-        
-        // TODO: FIX
-        // [self newAudioSample:sampleBuffer];
-        [self setStreamingSessionPreset:_streamingPreset];
-        
-        NSLog(@"[RIGATTA] Calling openWithUrl width=%.0f height=%.0f bitrate=%d", _streamingSize.width, _streamingSize.height, bitrate.intValue);
-        [_rtmpStream openWithUrl:url width: _streamingSize.width height: _streamingSize.height bitrate: bitrate.integerValue];
-        _isStreaming = YES;
-        _isStreamingPaused = NO;
-        _videoTimeOffset = CMTimeMake(0, 1);
-        _audioTimeOffset = CMTimeMake(0, 1);
-        _videoIsDisconnected = NO;
-        _audioIsDisconnected = NO;
-        result(nil);
+    if (bitrate == nil || [bitrate isEqualToNumber:@0]) {
+        bitrate = [NSNumber numberWithInt:160 * 1000];
     }
+    _isStreaming = YES;
+    _isStreamingPaused = NO;
+    _videoTimeOffset = CMTimeMake(0, 1);
+    _audioTimeOffset = CMTimeMake(0, 1);
+    _videoIsDisconnected = NO;
+    _audioIsDisconnected = NO;
+    // Return to Flutter immediately — AVCaptureSession preset change and RTMP connect run async
+    result(nil);
+    NSNumber *bitrateCapture = bitrate;
+    NSString *urlCapture = url;
+    CGSize sizeCapture = _streamingSize;
+    NSString *presetCapture = _streamingPreset;
+    FlutterRTMPStreaming *rtmpCapture = _rtmpStream;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSLog(@"[RIGATTA] Calling setStreamingSessionPreset async");
+        [self setStreamingSessionPreset:presetCapture];
+        NSLog(@"[RIGATTA] Calling openWithUrl width=%.0f height=%.0f bitrate=%d", sizeCapture.width, sizeCapture.height, bitrateCapture.intValue);
+        [rtmpCapture openWithUrl:urlCapture width:sizeCapture.width height:sizeCapture.height bitrate:bitrateCapture.integerValue];
+    });
 }
 
 
