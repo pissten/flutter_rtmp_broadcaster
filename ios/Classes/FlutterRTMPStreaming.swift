@@ -10,15 +10,18 @@ import VideoToolbox
 
 @objc
 public class FlutterRTMPStreaming : NSObject {
-    private var rtmpConnection = RTMPConnection()
+    private var rtmpConnection: RTMPConnection = {
+        let conn = RTMPConnection()
+        conn.requireNetworkFramework = false
+        return conn
+    }()
     private var rtmpStream: RTMPStream!
     private var url: String? = nil
     private var name: String? = nil
     private var retries: Int = 0
-    private var eventSink: FlutterEventSink?
-    private var isStreaming: Bool = false
+    private let eventSink: FlutterEventSink
     private let myDelegate = MyRTMPStreamQoSDelagate()
-
+    
     @objc
     public init(sink: @escaping FlutterEventSink) {
         eventSink = sink
@@ -26,23 +29,30 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
-        print("[RIGATTA-SWIFT] TEST 2: Start streaming UTEN video/audio data")
-        
         rtmpStream = RTMPStream(connection: rtmpConnection)
+        rtmpStream.captureSettings = [
+            .sessionPreset: AVCaptureSession.Preset.hd1280x720,
+            .continuousAutofocus: true,
+            .continuousExposure: true
+        ]
+        rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
+        rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
         
-        // Split URL for go2rtc compatibility
-        var parts = url.components(separatedBy: "/")
-        let streamName = parts.last ?? ""
-        parts.removeLast()
-        let baseUrl = parts.joined(separator: "/")
-        self.url = baseUrl.isEmpty ? url : baseUrl
-        self.name = streamName
-        print("[RIGATTA-SWIFT] URL split: original='\(url)' base='\(self.url ?? "NIL")' name='\(self.name ?? "NIL")'")
+        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/Event1_DEV-001
+        // go2rtc requires: connect("rtmp://host:1935/app") + publish("streamName")
+        // Split: base = everything up to last "/", name = last path segment
+        if let lastSlash = url.lastIndex(of: "/") {
+            self.url = String(url[url.startIndex..<lastSlash])
+            self.name = String(url[url.index(after: lastSlash)...])
+        } else {
+            self.url = url
+            self.name = ""
+        }
         
-        // Sett video settings (men ikke send data)
         rtmpStream.videoSettings = [
             .width: width,
             .height: height,
+            .profileLevel: kVTProfileLevel_H264_Baseline_AutoLevel,
             .maxKeyFrameIntervalDuration: 2,
             .bitrate: bitrate
         ]
@@ -50,26 +60,21 @@ public class FlutterRTMPStreaming : NSObject {
             .fps: 30
         ]
         rtmpStream.delegate = myDelegate
-        
-        // Legg til status handler
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(rtmpStatusHandler(_:)),
-            name: NSNotification.Name.RTMPConnection,
-            object: nil
-        )
-        
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(rtmpStatusHandler(_:)),
-            name: NSNotification.Name.RTMPStream,
-            object: nil
-        )
-        
         self.retries = 0
-        
+        // Run this on the ui thread.
         DispatchQueue.main.async {
-            print("[RIGATTA-SWIFT] TEST 2: Starter connect...")
+            if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
+                self.rtmpStream.orientation = orientation
+                print(String(format:"Orient %d", orientation.rawValue))
+                switch (orientation) {
+                case .landscapeLeft, .landscapeRight:
+                    self.rtmpStream.videoSettings[.width] = width
+                    self.rtmpStream.videoSettings[.height] = height
+                    break
+                default:
+                    break
+                }
+            }
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
@@ -81,32 +86,26 @@ public class FlutterRTMPStreaming : NSObject {
         guard let data: ASObject = e.data as? ASObject, let code: String = data["code"] as? String else {
             return
         }
-        
-        print("[RIGATTA-SWIFT] RTMP Event: \(code)")
-        
+        print(e)
         switch code {
-        case "NetConnection.Connect.Success":
-            print("[RIGATTA-SWIFT] ✅ Connection successful!")
-            print("[RIGATTA-SWIFT] Starter publish til stream: \(self.name ?? "NIL")")
-            DispatchQueue.main.async {
-                self.rtmpStream.publish(self.name ?? "")
+        case RTMPConnection.Code.connectSuccess.rawValue:
+            rtmpStream.publish(name)
+            retries = 0
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
+            break
+        case RTMPConnection.Code.connectFailed.rawValue, RTMPConnection.Code.connectClosed.rawValue:
+            guard retries <= 3 else {
+                DispatchQueue.main.async { self.eventSink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) }
+                return
             }
-            
-        case "NetConnection.Connect.Failed":
-            print("[RIGATTA-SWIFT] ❌ Connection failed!")
-            
-        case "NetConnection.Connect.Closed":
-            print("[RIGATTA-SWIFT] 🔌 Connection closed")
-            
-        case "NetStream.Publish.Start":
-            print("[RIGATTA-SWIFT] 🎥 Stream started publishing!")
-            print("[RIGATTA-SWIFT] ⚠️ IKKE send video/audio data - tester om dette krasjer")
-            
-        case "NetStream.Publish.Failed":
-            print("[RIGATTA-SWIFT] ❌ Stream publish failed!")
-            
+            retries += 1
+            DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
+                self.rtmpConnection.connect(self.url!)
+            }
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) }
+            break
         default:
-            print("[RIGATTA-SWIFT] ℹ️ Other event: \(code)")
+            break
         }
     }
     
@@ -116,20 +115,14 @@ public class FlutterRTMPStreaming : NSObject {
             os_log("%s", notification.name.rawValue)
         }
         guard retries <= 3 else {
-            DispatchQueue.main.async { 
-                guard let sink = self.eventSink else { return }
-                sink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) 
-            }
+            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) }
             return
         }
         retries += 1
         DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
             self.rtmpConnection.connect(self.url!)
         }
-        DispatchQueue.main.async { 
-            guard let sink = self.eventSink else { return }
-            sink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) 
-        }
+        DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) }
     }
     
     @objc
@@ -162,6 +155,11 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func addVideoData(buffer: CMSampleBuffer) {
+        struct Once { static var done = false }
+        if !Once.done {
+            print("[RIGATTA-SWIFT] addVideoData: first frame received, rtmpStream=\(rtmpStream != nil ? "OK" : "NIL")")
+            Once.done = true
+        }
         rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
     
@@ -172,8 +170,6 @@ public class FlutterRTMPStreaming : NSObject {
     
     @objc
     public func close() {
-        isStreaming = false
-        print("[RIGATTA-SWIFT] close(): stopping streaming, isStreaming=false")
         rtmpConnection.close()
     }
     
@@ -205,5 +201,37 @@ public class FlutterRTMPStreaming : NSObject {
         } catch {
             print("Error setting zoom: \(error)")
         }
+    }
+}
+
+
+class MyRTMPStreamQoSDelagate: RTMPStreamDelegate {
+    let minBitrate: UInt32 = 300 * 1024
+    let maxBitrate: UInt32 = 2500 * 1024
+    let incrementBitrate: UInt32 = 512 * 1024
+    
+    func didPublishSufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
+        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
+        
+        var newVideoBitrate = videoBitrate + incrementBitrate
+        if newVideoBitrate > maxBitrate {
+            newVideoBitrate = maxBitrate
+        }
+        print("didPublishSufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
+        stream.videoSettings[.bitrate] = newVideoBitrate
+    }
+    
+    func didPublishInsufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
+        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
+        
+        var newVideoBitrate = UInt32(videoBitrate / 2)
+        if newVideoBitrate < minBitrate {
+            newVideoBitrate = minBitrate
+        }
+        print("didPublishInsufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
+        stream.videoSettings[.bitrate] = newVideoBitrate
+    }
+    
+    func clear() {
     }
 }
