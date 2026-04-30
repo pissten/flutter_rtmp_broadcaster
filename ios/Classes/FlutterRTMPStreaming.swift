@@ -61,7 +61,6 @@ public class FlutterRTMPStreaming : NSObject {
         ]
         rtmpStream.delegate = myDelegate
         self.retries = 0
-        // Run this on the ui thread.
         DispatchQueue.main.async {
             if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
                 self.rtmpStream.orientation = orientation
@@ -75,6 +74,9 @@ public class FlutterRTMPStreaming : NSObject {
                     break
                 }
             }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            print("[RIGATTA-SWIFT] Connecting to \(self.url ?? "NIL")")
             self.rtmpConnection.connect(self.url ?? "")
         }
     }
