@@ -36,20 +36,20 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         // (~8 frames) → pushVideo blocks permanently after ~8 frames.
         let effectiveWidth = width > 0 ? width : 480
         let effectiveHeight = height > 0 ? height : 720
-        let requestedBitrate = bitrate > 0 ? bitrate : 1_000_000
-        // Low-latency: cap peak bitrate slightly to reduce uplink buffering in MSE/WebRTC chains.
-        let effectiveBitrate = min(requestedBitrate, 850_000)
+        // Use requested bitrate as-is — capping + very short GOP caused huge IDR spikes vs budget
+        // and periodic viewer stalls (~5s) on some chains.
+        let effectiveBitrate = bitrate > 0 ? bitrate : 1_000_000
         let videoFps: UInt = 30
-        // ~0.5 s GOP at 30 fps — frequent IDR cuts viewer join and end-to-end delay.
-        let gopFrames: UInt = 15
-        NSLog("[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) bitrate=\(effectiveBitrate) (req=\(requestedBitrate)) fps=\(videoFps) gop=\(gopFrames)")
+        // ~1 s GOP at 30 fps: fewer/larger IDR bursts than 0.5s GOP, smoother for RTMP/MSE.
+        let gopFrames: UInt = 30
+        NSLog("[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) bitrate=\(effectiveBitrate) fps=\(videoFps) gop=\(gopFrames)")
 
         let audioConfig = LFLiveAudioConfiguration.defaultConfiguration(for: LFLiveAudioQuality.high)
         let videoConfig = LFLiveVideoConfiguration()
         videoConfig.videoSize = CGSize(width: effectiveWidth, height: effectiveHeight)
         videoConfig.videoBitRate = UInt(effectiveBitrate)
         videoConfig.videoMaxBitRate = UInt(effectiveBitrate)
-        videoConfig.videoMinBitRate = UInt(max(250_000, Int(Double(effectiveBitrate) * 0.55)))
+        videoConfig.videoMinBitRate = UInt(max(300_000, Int(Double(effectiveBitrate) * 0.6)))
         videoConfig.videoFrameRate = videoFps
         videoConfig.videoMaxKeyframeInterval = gopFrames
 
