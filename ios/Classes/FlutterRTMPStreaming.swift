@@ -1,232 +1,258 @@
 import Flutter
-import UIKit
+import Foundation
 import AVFoundation
-import Accelerate
-import CoreMotion
-import HaishinKit
-import os
-import ReplayKit
-import VideoToolbox
+import LFLiveKit
 
 @objc
-public class FlutterRTMPStreaming : NSObject {
-    private var rtmpConnection: RTMPConnection = {
-        let conn = RTMPConnection()
-        conn.requireNetworkFramework = false
-        return conn
-    }()
-    private var rtmpStream: RTMPStream!
-    private var url: String? = nil
-    private var name: String? = nil
-    private var retries: Int = 0
+public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     private let eventSink: FlutterEventSink
-    private let myDelegate = MyRTMPStreamQoSDelagate()
-    
+    private var liveSession: LFLiveSession?
+    private var isPublishing = false
+    private var isPaused = false
+    private var latestDebugInfo: LFLiveDebug?
+    private var latestState: LFLiveState = .ready
+    private var activePublishUrl: String = ""
+    // Decouple LFLive push from the camera delegate queue so a blocking pushVideo
+    // does not stall AVCapture frame delivery. Concurrent so audio/video do not
+    // serialize each other.
+    private let pushVideoQueue = DispatchQueue(label: "rigatta.lflive.pushVideo", qos: .userInitiated)
+    private let pushAudioQueue = DispatchQueue(label: "rigatta.lflive.pushAudio", qos: .userInitiated)
+
     @objc
     public init(sink: @escaping FlutterEventSink) {
-        eventSink = sink
+        self.eventSink = sink
+        super.init()
     }
-    
+
     @objc
     public func open(url: String, width: Int, height: Int, bitrate: Int) {
-        rtmpStream = RTMPStream(connection: rtmpConnection)
-        rtmpConnection.addEventListener(.rtmpStatus, selector:#selector(rtmpStatusHandler), observer: self)
-        rtmpConnection.addEventListener(.ioError, selector: #selector(rtmpErrorHandler), observer: self)
-        
-        // Rigatta URL format: rtmp://rtmp.rigatta.no:1935/Event1_DEV-001
-        // go2rtc requires: connect("rtmp://host:1935") + publish("app/streamName")
-        // Use URL components for safe parsing
-        if let parsedUrl = URL(string: url), let host = parsedUrl.host, let port = parsedUrl.port {
-            self.url = "rtmp://\(host):\(port)"
-            let path = parsedUrl.path
-            self.name = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        } else {
-            self.url = url
-            self.name = ""
-        }
-        
-        rtmpStream.videoSettings = [
-            .width: width,
-            .height: height,
-            .profileLevel: kVTProfileLevel_H264_Baseline_AutoLevel,
-            .maxKeyFrameIntervalDuration: 2,
-            .bitrate: bitrate
-        ]
-        rtmpStream.delegate = myDelegate
-        self.retries = 0
-        DispatchQueue.main.async {
-            if let orientation = DeviceUtil.videoOrientation(by: UIApplication.shared.statusBarOrientation) {
-                self.rtmpStream.orientation = orientation
-                print(String(format:"Orient %d", orientation.rawValue))
-                switch (orientation) {
-                case .landscapeLeft, .landscapeRight:
-                    self.rtmpStream.videoSettings[.width] = width
-                    self.rtmpStream.videoSettings[.height] = height
-                    break
-                default:
-                    break
-                }
-            }
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            print("[RIGATTA-SWIFT] Connecting to \(self.url ?? "NIL")")
-            self.rtmpConnection.connect(self.url ?? "")
-        }
+        closeInternal(emitStoppedEvent: false)
+
+        let normalizedUrl = normalizeUrlForLFLive(url)
+        activePublishUrl = normalizedUrl
+
+        // CRITICAL: encoder size MUST match the actual capture size, otherwise
+        // VTCompressionSession scales internally and exhausts its bounded pool
+        // (~8 frames) → pushVideo blocks permanently after ~8 frames.
+        let effectiveWidth = width > 0 ? width : 480
+        let effectiveHeight = height > 0 ? height : 720
+        let requestedBitrate = bitrate > 0 ? bitrate : 1_000_000
+        // Low-latency: cap peak bitrate slightly to reduce uplink buffering in MSE/WebRTC chains.
+        let effectiveBitrate = min(requestedBitrate, 850_000)
+        let videoFps: UInt = 30
+        // ~0.5 s GOP at 30 fps — frequent IDR cuts viewer join and end-to-end delay.
+        let gopFrames: UInt = 15
+        NSLog("[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) bitrate=\(effectiveBitrate) (req=\(requestedBitrate)) fps=\(videoFps) gop=\(gopFrames)")
+
+        let audioConfig = LFLiveAudioConfiguration.defaultConfiguration(for: LFLiveAudioQuality.high)
+        let videoConfig = LFLiveVideoConfiguration()
+        videoConfig.videoSize = CGSize(width: effectiveWidth, height: effectiveHeight)
+        videoConfig.videoBitRate = UInt(effectiveBitrate)
+        videoConfig.videoMaxBitRate = UInt(effectiveBitrate)
+        videoConfig.videoMinBitRate = UInt(max(250_000, Int(Double(effectiveBitrate) * 0.55)))
+        videoConfig.videoFrameRate = videoFps
+        videoConfig.videoMaxKeyframeInterval = gopFrames
+
+        // LFLiveInputMaskAll (raw value 12): external audio + external video.
+        let captureType = LFLiveCaptureTypeMask(rawValue: 12)!
+        let session = LFLiveSession(
+            audioConfiguration: audioConfig,
+            videoConfiguration: videoConfig,
+            captureType: captureType
+        )
+        session?.delegate = self
+        session?.showDebugInfo = true
+        session?.adaptiveBitrate = false
+        session?.reconnectCount = 0
+        session?.reconnectInterval = 1
+        liveSession = session
+
+        emit([
+            "event": "rtmp_debug_split",
+            "connectUrl": normalizedUrl,
+            "publishName": "",
+            "errorDescription": ""
+        ])
+
+        let stream = LFLiveStreamInfo()
+        stream.url = normalizedUrl
+        liveSession?.startLive(stream)
+
+        isPublishing = true
+        isPaused = false
+        emit([
+            "event": "rtmp_status",
+            "code": "NetConnection.Connect.Pending",
+            "level": "status",
+            "errorDescription": ""
+        ])
     }
 
-    
-    @objc
-    private func rtmpStatusHandler(_ notification: Notification) {
-        let e = Event.from(notification)
-        guard let data: ASObject = e.data as? ASObject, let code: String = data["code"] as? String else {
-            return
-        }
-        print(e)
-        switch code {
-        case RTMPConnection.Code.connectSuccess.rawValue:
-            rtmpStream.publish(name)
-            retries = 0
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_connected", "errorDescription" : ""]) }
-            break
-        case RTMPConnection.Code.connectFailed.rawValue, RTMPConnection.Code.connectClosed.rawValue:
-            guard retries <= 3 else {
-                DispatchQueue.main.async { self.eventSink(["event" : "error", "errorDescription" : "connection failed " + e.type.rawValue]) }
-                return
-            }
-            retries += 1
-            DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
-                self.rtmpConnection.connect(self.url!)
-            }
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "connection failed " + e.type.rawValue]) }
-            break
-        default:
-            break
-        }
-    }
-    
-    @objc
-    private func rtmpErrorHandler(_ notification: Notification) {
-        if #available(iOS 10.0, *) {
-            os_log("%s", notification.name.rawValue)
-        }
-        guard retries <= 3 else {
-            DispatchQueue.main.async { self.eventSink(["event" : "rtmp_stopped", "errorDescription" : "rtmp disconnected"]) }
-            return
-        }
-        retries += 1
-        DispatchQueue.global().asyncAfter(deadline: .now() + pow(2.0, Double(retries))) {
-            self.rtmpConnection.connect(self.url!)
-        }
-        DispatchQueue.main.async { self.eventSink(["event" : "rtmp_retry", "errorDescription" : "rtmp disconnected"]) }
-    }
-    
-    @objc
-    public func pauseVideoStreaming() {
-        rtmpStream.paused = true
-    }
-    
-    @objc
-    public func resumeVideoStreaming() {
-        rtmpStream.paused = false
-    }
-    
-    @objc
-    public func isPaused() -> Bool {
-        return rtmpStream.paused
-    }
-    
-    @objc
-    public func getStreamStatistics() -> NSDictionary {
-        let ret: NSDictionary = [
-            "paused": isPaused(),
-            "bitrate": rtmpStream.videoSettings[.bitrate]!,
-            "width": rtmpStream.videoSettings[.width]!,
-            "height": rtmpStream.videoSettings[.height]!,
-            "fps": (rtmpStream.captureSettings[.fps]! as! NSNumber).floatValue,
-            "orientation": rtmpStream.orientation.rawValue
-        ]
-        return ret
-    }
-    
     @objc
     public func addVideoData(buffer: CMSampleBuffer) {
-        struct Once { static var done = false }
-        if !Once.done {
-            print("[RIGATTA-SWIFT] addVideoData: first frame received, rtmpStream=\(rtmpStream != nil ? "OK" : "NIL")")
-            Once.done = true
+        guard isPublishing, !isPaused else { return }
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(buffer) else { return }
+        // Explicit retain so buffer cannot be reclaimed by AVCapture pool
+        // before the async block runs the encoder. Released after pushVideo.
+        let retained = Unmanaged.passRetained(imageBuffer)
+        pushVideoQueue.async { [weak self] in
+            defer { retained.release() }
+            guard let self = self, self.isPublishing, !self.isPaused else { return }
+            RigattaWatchdogTickPushVideoEnter()
+            self.liveSession?.pushVideo(retained.takeUnretainedValue())
+            RigattaWatchdogTickPushVideoExit()
         }
-        rtmpStream.appendSampleBuffer(buffer, withType: .video)
     }
-    
+
     @objc
     public func addAudioData(buffer: CMSampleBuffer) {
-        rtmpStream.appendSampleBuffer(buffer, withType: .audio)
+        guard isPublishing, !isPaused else { return }
+        guard let pcmData = pcmDataFromSampleBuffer(buffer) else { return }
+        pushAudioQueue.async { [weak self] in
+            guard let self = self, self.isPublishing, !self.isPaused else { return }
+            RigattaWatchdogTickPushAudioEnter()
+            self.liveSession?.pushAudio(pcmData)
+            RigattaWatchdogTickPushAudioExit()
+        }
     }
-    
+
+    private func pcmDataFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> Data? {
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return nil
+        }
+        var length: Int = 0
+        var totalLength: Int = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            dataBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &length,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard status == noErr, let pointer = dataPointer, totalLength > 0 else {
+            return nil
+        }
+        return Data(bytes: pointer, count: totalLength)
+    }
+
+    @objc
+    public func pauseVideoStreaming() {
+        isPaused = true
+    }
+
+    @objc
+    public func resumeVideoStreaming() {
+        isPaused = false
+    }
+
+    @objc
+    public func getStreamStatistics() -> NSDictionary {
+        let debug = latestDebugInfo
+        return [
+            "state": Int(latestState.rawValue),
+            "isPublishing": isPublishing,
+            "isPaused": isPaused,
+            "currentBandwidth": debug?.currentBandwidth ?? 0,
+            "bandwidth": debug?.bandwidth ?? 0,
+            "dropFrame": debug?.dropFrame ?? 0,
+            "totalFrame": debug?.totalFrame ?? 0,
+            "capturedAudioCount": debug?.capturedAudioCount ?? 0,
+            "capturedVideoCount": debug?.capturedVideoCount ?? 0,
+            "unSendCount": debug?.unSendCount ?? 0
+        ]
+    }
+
     @objc
     public func close() {
-        rtmpConnection.close()
-    }
-    
-    // MARK: - Zoom methods (Rigatta addition)
-    
-    @objc
-    public func getMinZoomLevel() -> Double {
-        return 1.0
-    }
-    
-    private func currentCaptureDevice() -> AVCaptureDevice? {
-        return AVCaptureDevice.default(for: .video)
+        closeInternal(emitStoppedEvent: true)
     }
 
-    @objc
-    public func getMaxZoomLevel() -> Double {
-        guard let device = currentCaptureDevice() else { return 1.0 }
-        return Double(device.activeFormat.videoMaxZoomFactor)
-    }
-    
-    @objc
-    public func setZoomLevel(zoom: Double) {
-        guard let device = currentCaptureDevice() else { return }
-        let clampedZoom = min(max(zoom, 1.0), Double(device.activeFormat.videoMaxZoomFactor))
-        do {
-            try device.lockForConfiguration()
-            device.videoZoomFactor = CGFloat(clampedZoom)
-            device.unlockForConfiguration()
-        } catch {
-            print("Error setting zoom: \(error)")
+    public func liveSession(_ session: LFLiveSession?, liveStateDidChange state: LFLiveState) {
+        latestState = state
+        NSLog("[RIGATTA-LF] liveStateDidChange: \(state.rawValue) url=\(activePublishUrl)")
+        switch state {
+        case .ready:
+            emitStatus(code: "NetConnection.Connect.Ready", level: "status", description: "")
+        case .pending:
+            emitStatus(code: "NetConnection.Connect.Pending", level: "status", description: "")
+        case .start:
+            emitStatus(code: "NetStream.Publish.Start", level: "status", description: "")
+            emit(["event": "rtmp_connected", "errorDescription": ""])
+        case .stop:
+            isPublishing = false
+            emit(["event": "rtmp_stopped", "errorDescription": "rtmp stopped"])
+        case .error:
+            isPublishing = false
+            emitStatus(code: "NetConnection.Connect.Failed", level: "error", description: "LFLive state error")
+            emit(["event": "rtmp_stream_error", "errorDescription": "LFLive state error"])
+        default:
+            emitStatus(code: "LFLiveState.\(state.rawValue)", level: "status", description: "")
         }
     }
-}
 
+    public func liveSession(_ session: LFLiveSession?, errorCode: LFLiveSocketErrorCode) {
+        let message = "LFLive socket error \(errorCode.rawValue)"
+        NSLog("[RIGATTA-LF] socket error: \(message) url=\(activePublishUrl)")
+        emitStatus(code: "NetConnection.Connect.Failed", level: "error", description: message)
+        emit(["event": "rtmp_stream_error", "errorDescription": message])
+    }
 
-class MyRTMPStreamQoSDelagate: RTMPStreamDelegate {
-    let minBitrate: UInt32 = 300 * 1024
-    let maxBitrate: UInt32 = 2500 * 1024
-    let incrementBitrate: UInt32 = 512 * 1024
-    
-    func didPublishSufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
-        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
-        
-        var newVideoBitrate = videoBitrate + incrementBitrate
-        if newVideoBitrate > maxBitrate {
-            newVideoBitrate = maxBitrate
+    public func liveSession(_ session: LFLiveSession?, debugInfo: LFLiveDebug?) {
+        latestDebugInfo = debugInfo
+        if let debugInfo {
+            NSLog("[RIGATTA-LF] debug bandwidth=\(debugInfo.currentBandwidth) drop=\(debugInfo.dropFrame) unsent=\(debugInfo.unSendCount)")
         }
-        print("didPublishSufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
-        stream.videoSettings[.bitrate] = newVideoBitrate
+        emit([
+            "event": "rtmp_probe",
+            "bytesOut": Int(debugInfo?.dataFlow ?? 0),
+            "bytesIn": 0,
+            "errorDescription": ""
+        ])
     }
-    
-    func didPublishInsufficientBW(_ stream: RTMPStream, withConnection: RTMPConnection) {
-        guard let videoBitrate = stream.videoSettings[.bitrate] as? UInt32 else { return }
-        
-        var newVideoBitrate = UInt32(videoBitrate / 2)
-        if newVideoBitrate < minBitrate {
-            newVideoBitrate = minBitrate
+
+    private func closeInternal(emitStoppedEvent: Bool) {
+        if let session = liveSession {
+            session.stopLive()
+            session.running = false
+            session.delegate = nil
         }
-        print("didPublishInsufficientBW update: \(videoBitrate) -> \(newVideoBitrate)")
-        stream.videoSettings[.bitrate] = newVideoBitrate
+        liveSession = nil
+        isPublishing = false
+        isPaused = false
+        latestDebugInfo = nil
+        latestState = .ready
+        activePublishUrl = ""
+
+        if emitStoppedEvent {
+            emit(["event": "rtmp_stopped", "errorDescription": "rtmp disconnected"])
+        }
     }
-    
-    func clear() {
+
+    private func emitStatus(code: String, level: String, description: String) {
+        emit([
+            "event": "rtmp_status",
+            "code": code,
+            "level": level,
+            "errorDescription": description
+        ])
+    }
+
+    private func emit(_ payload: [String: Any]) {
+        DispatchQueue.main.async {
+            self.eventSink(payload)
+        }
+    }
+
+    private func normalizeUrlForLFLive(_ url: String) -> String {
+        guard var components = URLComponents(string: url),
+              components.scheme?.lowercased() == "rtmp" else {
+            return url
+        }
+        if components.port == 1935 {
+            components.port = nil
+            return components.string ?? url
+        }
+        return url
     }
 }
