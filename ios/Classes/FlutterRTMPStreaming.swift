@@ -1,6 +1,7 @@
 import Flutter
 import Foundation
 import AVFoundation
+import QuartzCore
 import LFLiveKit
 
 @objc
@@ -12,11 +13,10 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     private var latestDebugInfo: LFLiveDebug?
     private var latestState: LFLiveState = .ready
     private var activePublishUrl: String = ""
-    // Decouple LFLive push from the camera delegate queue so a blocking pushVideo
-    // does not stall AVCapture frame delivery. Concurrent so audio/video do not
-    // serialize each other.
-    private let pushVideoQueue = DispatchQueue(label: "rigatta.lflive.pushVideo", qos: .userInitiated)
-    private let pushAudioQueue = DispatchQueue(label: "rigatta.lflive.pushAudio", qos: .userInitiated)
+    // One serial queue: preserves delegate submission order and lets us use
+    // CMSampleBuffer PTS for both paths (LFLive default NOW on separate queues
+    // can be non-monotonic vs capture → periodic MSE/player stalls).
+    private let pushMediaQueue = DispatchQueue(label: "rigatta.lflive.pushMedia", qos: .userInitiated)
 
     @objc
     public init(sink: @escaping FlutterEventSink) {
@@ -92,14 +92,15 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     public func addVideoData(buffer: CMSampleBuffer) {
         guard isPublishing, !isPaused else { return }
         guard let imageBuffer = CMSampleBufferGetImageBuffer(buffer) else { return }
+        let tsMs = Self.millisFromSampleBufferPts(buffer)
         // Explicit retain so buffer cannot be reclaimed by AVCapture pool
         // before the async block runs the encoder. Released after pushVideo.
         let retained = Unmanaged.passRetained(imageBuffer)
-        pushVideoQueue.async { [weak self] in
+        pushMediaQueue.async { [weak self] in
             defer { retained.release() }
             guard let self = self, self.isPublishing, !self.isPaused else { return }
             RigattaWatchdogTickPushVideoEnter()
-            self.liveSession?.pushVideo(retained.takeUnretainedValue())
+            self.liveSession?.pushVideo(retained.takeUnretainedValue(), timeStampMs: tsMs)
             RigattaWatchdogTickPushVideoExit()
         }
     }
@@ -108,12 +109,26 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     public func addAudioData(buffer: CMSampleBuffer) {
         guard isPublishing, !isPaused else { return }
         guard let pcmData = pcmDataFromSampleBuffer(buffer) else { return }
-        pushAudioQueue.async { [weak self] in
+        let tsMs = Self.millisFromSampleBufferPts(buffer)
+        pushMediaQueue.async { [weak self] in
             guard let self = self, self.isPublishing, !self.isPaused else { return }
             RigattaWatchdogTickPushAudioEnter()
-            self.liveSession?.pushAudio(pcmData)
+            self.liveSession?.pushAudio(pcmData, timeStampMs: tsMs)
             RigattaWatchdogTickPushAudioExit()
         }
+    }
+
+    /// Presentation time in milliseconds (same master clock for audio + video from AVCapture).
+    private static func millisFromSampleBufferPts(_ sampleBuffer: CMSampleBuffer) -> UInt64 {
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if !CMTIME_IS_VALID(pts) || CMTIME_IS_INDEFINITE(pts) {
+            return UInt64(CACurrentMediaTime() * 1000.0)
+        }
+        let seconds = CMTimeGetSeconds(pts)
+        if seconds.isNaN || seconds.isInfinite || seconds < 0 {
+            return UInt64(CACurrentMediaTime() * 1000.0)
+        }
+        return UInt64(seconds * 1000.0)
     }
 
     private func pcmDataFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> Data? {
