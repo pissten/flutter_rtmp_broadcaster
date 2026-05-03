@@ -35,6 +35,7 @@ import net.ossrs.rtmp.ConnectCheckerRtmp
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.URI
 import java.nio.ByteBuffer
 import java.util.*
 
@@ -67,6 +68,8 @@ class Camera(
     private val maxRetries = 3
     private var currentRetries = 0
     private var publishUrl: String? = null
+    private val probeHandler = Handler()
+    private var probeRunnable: Runnable? = null
     private val aspectRatio: Double = 4.0 / 5.0
 
 //    private val glView: FlutterGLSurfaceView
@@ -590,6 +593,7 @@ class Camera(
     }
 
     fun close() {
+        stopAndroidProbe()
         closeCaptureSession()
         if (cameraDevice != null) {
             cameraDevice!!.close()
@@ -623,6 +627,8 @@ class Camera(
             return
         }
         try {
+            publishUrl = url
+            logAndroidWireIntent(url)
             // Setup the rtmp session
             if (rtmpCamera == null) {
                 currentRetries = 0
@@ -765,15 +771,19 @@ class Camera(
     }
 
     override fun onConnectionSuccessRtmp() {
+        Log.i(TAG, "[RIGATTA-ANDROID] rtmp connected")
         bitrateAdapter = BitrateAdapter(object : BitrateAdapter.Listener {
             override fun onBitrateAdapted(bitrate: Int) {
                 rtmpCamera!!.setVideoBitrateOnFly(bitrate)
             }
         })
         bitrateAdapter!!.setMaxBitrate(rtmpCamera!!.getBitrate())
+        startAndroidProbe()
     }
 
     override fun onConnectionFailedRtmp(reason: String) {
+        Log.e(TAG, "[RIGATTA-ANDROID] rtmp connection failed: $reason")
+        stopAndroidProbe()
         if (rtmpCamera != null) {
             // Retry first.
             for (i in currentRetries..maxRetries) {
@@ -796,12 +806,15 @@ class Camera(
     }
 
     override fun onAuthErrorRtmp() {
+        Log.e(TAG, "[RIGATTA-ANDROID] rtmp auth error")
         activity!!.runOnUiThread {
             dartMessenger.send(DartMessenger.EventType.ERROR, "Auth error")
         }
     }
 
     override fun onDisconnectRtmp() {
+        Log.i(TAG, "[RIGATTA-ANDROID] rtmp disconnected")
+        stopAndroidProbe()
         if (rtmpCamera != null) {
             rtmpCamera!!.stopStream()
 //            rtmpCamera = null
@@ -813,6 +826,58 @@ class Camera(
 
     companion object {
         private val TAG: String? = "FlutterCamera"
+    }
+
+    private fun logAndroidWireIntent(url: String) {
+        try {
+            val parsed = URI(url)
+            val scheme = parsed.scheme ?: "rtmp"
+            val host = parsed.host ?: ""
+            val port = if (parsed.port > 0) parsed.port else 1935
+            val rawPath = parsed.path?.trimStart('/') ?: ""
+            var connectUrl = "$scheme://$host:$port/"
+            var publishName = ""
+            if (rawPath.isNotEmpty()) {
+                val slash = rawPath.lastIndexOf('/')
+                if (slash >= 0) {
+                    val app = rawPath.substring(0, slash)
+                    publishName = rawPath.substring(slash + 1)
+                    connectUrl = if (app.isEmpty()) "$scheme://$host:$port" else "$scheme://$host:$port/$app"
+                } else {
+                    connectUrl = url
+                    publishName = ""
+                }
+            }
+            Log.i(TAG, "[RIGATTA-ANDROID] wireIntent input=$url connectUrl=$connectUrl publishName=$publishName")
+        } catch (e: Exception) {
+            Log.w(TAG, "[RIGATTA-ANDROID] wireIntent parse failed for url=$url error=${e.message}")
+        }
+    }
+
+    private fun startAndroidProbe() {
+        stopAndroidProbe()
+        val runnable = object : Runnable {
+            override fun run() {
+                if (rtmpCamera != null && rtmpCamera!!.isStreaming) {
+                    Log.i(
+                        TAG,
+                        "[RIGATTA-ANDROID] probe sentVideo=${rtmpCamera!!.sentVideoFrames} " +
+                            "sentAudio=${rtmpCamera!!.sentAudioFrames} " +
+                            "droppedVideo=${rtmpCamera!!.droppedVideoFrames} " +
+                            "droppedAudio=${rtmpCamera!!.droppedAudioFrames} " +
+                            "cache=${rtmpCamera!!.cacheSize}"
+                    )
+                    probeHandler.postDelayed(this, 1000)
+                }
+            }
+        }
+        probeRunnable = runnable
+        probeHandler.post(runnable)
+    }
+
+    private fun stopAndroidProbe() {
+        probeRunnable?.let { probeHandler.removeCallbacks(it) }
+        probeRunnable = null
     }
 
     private var glSurfaceTexture: SurfaceTexture? = null

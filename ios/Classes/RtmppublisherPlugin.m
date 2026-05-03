@@ -10,6 +10,134 @@
 #import <CoreMotion/CoreMotion.h>
 #import <libkern/OSAtomic.h>
 #import <Flutter/Flutter.h>
+#import <mach/mach_time.h>
+#import <stdatomic.h>
+
+static inline void RigattaTrace(NSString *message) {
+    NSThread *thread = [NSThread isMainThread] ? [NSThread mainThread] : [NSThread currentThread];
+    NSString *threadName = thread.name.length > 0 ? thread.name : ([NSThread isMainThread] ? @"main" : @"bg");
+    fprintf(stderr, "[RIGATTA-TRACE] %s [thread=%s]\n", message.UTF8String, threadName.UTF8String);
+    fflush(stderr);
+}
+
+#pragma mark - Rigatta Watchdog (flight recorder)
+
+static dispatch_queue_t  gRigWatchdogQ = nil;
+static dispatch_source_t gRigWatchdogTimer = nil;
+static dispatch_queue_t  gRigPluginQ = nil;
+static _Atomic int64_t   gRigMainPing  = 0;
+static _Atomic int64_t   gRigPluginPing = 0;
+static _Atomic uint32_t  gRigVideoFrames = 0;
+static _Atomic uint32_t  gRigAudioFrames = 0;
+static _Atomic uint32_t  gRigPushVideoEnter = 0;
+static _Atomic uint32_t  gRigPushVideoExit  = 0;
+static _Atomic uint32_t  gRigPushAudioEnter = 0;
+static _Atomic uint32_t  gRigPushAudioExit  = 0;
+static _Atomic uint32_t  gRigTickCount = 0;
+
+static double RigSecondsSince(int64_t t0) {
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) { mach_timebase_info(&tb); }
+    int64_t now = mach_absolute_time();
+    int64_t diff = now - t0;
+    if (diff < 0) diff = 0;
+    return (double)diff * (double)tb.numer / (double)tb.denom / 1.0e9;
+}
+
+static void RigSchedulePingMain(void);
+static void RigSchedulePingPlugin(void);
+
+static void RigSchedulePingMain(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&gRigMainPing, (int64_t)mach_absolute_time());
+        if (gRigWatchdogTimer == nil) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       gRigWatchdogQ, ^{
+            if (gRigWatchdogTimer == nil) return;
+            RigSchedulePingMain();
+        });
+    });
+}
+
+static void RigSchedulePingPlugin(void) {
+    if (gRigPluginQ == nil) return;
+    dispatch_async(gRigPluginQ, ^{
+        atomic_store(&gRigPluginPing, (int64_t)mach_absolute_time());
+        if (gRigWatchdogTimer == nil) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       gRigWatchdogQ, ^{
+            if (gRigWatchdogTimer == nil) return;
+            RigSchedulePingPlugin();
+        });
+    });
+}
+
+void RigattaWatchdogStart(dispatch_queue_t pluginQueue) {
+    if (gRigWatchdogTimer != nil) return;
+    gRigPluginQ = pluginQueue;
+    gRigWatchdogQ = dispatch_queue_create("com.rigatta.watchdog", DISPATCH_QUEUE_SERIAL);
+
+    int64_t now = (int64_t)mach_absolute_time();
+    atomic_store(&gRigMainPing, now);
+    atomic_store(&gRigPluginPing, now);
+    atomic_store(&gRigVideoFrames, 0);
+    atomic_store(&gRigAudioFrames, 0);
+    atomic_store(&gRigPushVideoEnter, 0);
+    atomic_store(&gRigPushVideoExit, 0);
+    atomic_store(&gRigPushAudioEnter, 0);
+    atomic_store(&gRigPushAudioExit, 0);
+    atomic_store(&gRigTickCount, 0);
+
+    gRigWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gRigWatchdogQ);
+    dispatch_source_set_timer(gRigWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                              (uint64_t)(0.5 * NSEC_PER_SEC),
+                              (uint64_t)(50 * NSEC_PER_MSEC));
+    dispatch_source_set_event_handler(gRigWatchdogTimer, ^{
+        uint32_t tick = atomic_fetch_add(&gRigTickCount, 1) + 1;
+        double mainAge   = RigSecondsSince(atomic_load(&gRigMainPing));
+        double pluginAge = RigSecondsSince(atomic_load(&gRigPluginPing));
+        uint32_t vf  = atomic_load(&gRigVideoFrames);
+        uint32_t af  = atomic_load(&gRigAudioFrames);
+        uint32_t pve = atomic_load(&gRigPushVideoEnter);
+        uint32_t pvx = atomic_load(&gRigPushVideoExit);
+        uint32_t pae = atomic_load(&gRigPushAudioEnter);
+        uint32_t pax = atomic_load(&gRigPushAudioExit);
+        const char *mainLbl   = (mainAge   > 1.5) ? "BLOCKED" : "alive";
+        const char *pluginLbl = (pluginAge > 1.5) ? "BLOCKED" : "alive";
+        fprintf(stderr,
+                "[RIGATTA-HB t=%us] main=%s(%.2fs) plugin-q=%s(%.2fs) "
+                "video=%u audio=%u pushV(in=%u out=%u stuck=%d) pushA(in=%u out=%u stuck=%d)\n",
+                tick / 2, mainLbl, mainAge, pluginLbl, pluginAge,
+                vf, af, pve, pvx, (int)(pve - pvx), pae, pax, (int)(pae - pax));
+        fflush(stderr);
+    });
+    dispatch_resume(gRigWatchdogTimer);
+
+    RigSchedulePingMain();
+    RigSchedulePingPlugin();
+
+    fprintf(stderr, "[RIGATTA-HB] watchdog installed\n");
+    fflush(stderr);
+}
+
+void RigattaWatchdogStop(void) {
+    if (gRigWatchdogTimer != nil) {
+        dispatch_source_cancel(gRigWatchdogTimer);
+        gRigWatchdogTimer = nil;
+    }
+    gRigWatchdogQ = nil;
+    gRigPluginQ = nil;
+    fprintf(stderr, "[RIGATTA-HB] watchdog uninstalled\n");
+    fflush(stderr);
+}
+
+void RigattaWatchdogTickVideoFrame(void) { atomic_fetch_add(&gRigVideoFrames, 1); }
+void RigattaWatchdogTickAudioFrame(void) { atomic_fetch_add(&gRigAudioFrames, 1); }
+void RigattaWatchdogTickPushVideoEnter(void) { atomic_fetch_add(&gRigPushVideoEnter, 1); }
+void RigattaWatchdogTickPushVideoExit(void)  { atomic_fetch_add(&gRigPushVideoExit, 1); }
+void RigattaWatchdogTickPushAudioEnter(void) { atomic_fetch_add(&gRigPushAudioEnter, 1); }
+void RigattaWatchdogTickPushAudioExit(void)  { atomic_fetch_add(&gRigPushAudioExit, 1); }
 
 static FlutterError *getFlutterError(NSError *error) {
     return [FlutterError errorWithCode:[NSString stringWithFormat:@"Error %d", (int)error.code]
@@ -226,6 +354,24 @@ FlutterStreamHandler>
 // Format used for video and image streaming.
 FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
 
+- (void)emitEvent:(NSDictionary *)event {
+    FlutterEventSink sink = _eventSink;
+    if (!sink) {
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sink(event);
+    });
+}
+
+- (void)emitErrorWithCode:(NSString *)code description:(NSString *)description {
+    [self emitEvent:@{
+        @"event" : @"error",
+        @"errorCode" : code ?: @"UNKNOWN",
+        @"errorDescription" : description ?: @"Unknown error"
+    }];
+}
+
 - (instancetype)initWithCameraName:(NSString *)cameraName
                   resolutionPreset:(NSString *)resolutionPreset
                    streamingPreset:(NSString *)streamingPreset
@@ -261,7 +407,8 @@ FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
     _captureVideoOutput.videoSettings =
     @{(NSString *)kCVPixelBufferPixelFormatTypeKey : @(videoFormat)};
     [_captureVideoOutput setAlwaysDiscardsLateVideoFrames:YES];
-    [_captureVideoOutput setSampleBufferDelegate:self queue:dispatch_get_main_queue()];
+    // Keep capture callbacks off main thread to avoid UI lockups under load.
+    [_captureVideoOutput setSampleBufferDelegate:self queue:_dispatchQueue];
     
     AVCaptureConnection *connection =
     [AVCaptureConnection connectionWithInputPorts:_captureVideoInput.ports
@@ -570,6 +717,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 NSLog(@"[RIGATTA] First VIDEO frame sent to rtmpStream");
                 loggedVideo = YES;
             }
+            RigattaWatchdogTickVideoFrame();
             [_rtmpStream addVideoDataWithBuffer:sampleBuffer ];
         } else {
             static BOOL loggedAudio = NO;
@@ -577,6 +725,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                 NSLog(@"[RIGATTA] First AUDIO frame sent to rtmpStream");
                 loggedAudio = YES;
             }
+            RigattaWatchdogTickAudioFrame();
             [_rtmpStream addAudioDataWithBuffer:sampleBuffer ];
         }
         CFRelease(sampleBuffer);
@@ -793,9 +942,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 
 - (void)startVideoStreamingAtUrl:(NSString *)url bitrate:(NSNumber *)bitrate result:(FlutterResult)result {
-    NSLog(@"[RIGATTA] startVideoStreamingAtUrl called. url=%@ bitrate=%@ streamingSize=%.0fx%.0f", url, bitrate, _streamingSize.width, _streamingSize.height);
+    RigattaTrace([NSString stringWithFormat:@"checkpoint 1 startVideoStreamingAtUrl url=%@ bitrate=%@ size=%.0fx%.0f", url, bitrate, _streamingSize.width, _streamingSize.height]);
     if (_isStreaming) {
-        _eventSink(@{@"event" : @"error", @"errorDescription" : @"Video is already streaming!"});
+        [self emitErrorWithCode:@"ALREADY_STREAMING" description:@"Video is already streaming!"];
         return;
     }
     if (bitrate == nil || [bitrate isEqualToNumber:@0]) {
@@ -812,23 +961,31 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     NSNumber *bitrateCapture = bitrate;
     NSString *urlCapture = url;
     ResolutionPreset presetCapture = _streamingPreset;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        NSLog(@"[RIGATTA] setupWriterForUrl async start");
+    dispatch_async(_dispatchQueue, ^{
+        RigattaTrace(@"checkpoint 2 setupWriterForUrl async start");
         BOOL writerOK = [self setupWriterForUrl:urlCapture];
-        NSLog(@"[RIGATTA] setupWriterForUrl result: %@", writerOK ? @"YES" : @"NO");
+        RigattaTrace([NSString stringWithFormat:@"checkpoint 3 setupWriterForUrl result=%@", writerOK ? @"YES" : @"NO"]);
         if (!writerOK) {
-            self->_eventSink(@{@"event" : @"error", @"errorDescription" : @"Setup Writer Failed"});
+            [self emitErrorWithCode:@"SETUP_WRITER_FAILED" description:@"Setup Writer Failed"];
             self->_isStreaming = NO;
             return;
         }
         if (self->_rtmpStream == nil) {
             self->_rtmpStream = [[FlutterRTMPStreaming alloc] initWithSink:self->_eventSink];
-            NSLog(@"[RIGATTA] FlutterRTMPStreaming created");
+            RigattaTrace(@"checkpoint 4 FlutterRTMPStreaming created");
         }
         [self setStreamingSessionPreset:presetCapture];
         CGSize sizeCapture = self->_streamingSize;
-        NSLog(@"[RIGATTA] Calling openWithUrl width=%.0f height=%.0f bitrate=%d", sizeCapture.width, sizeCapture.height, bitrateCapture.intValue);
+        if (sizeCapture.width <= 0 || sizeCapture.height <= 0) {
+            [self emitErrorWithCode:@"INVALID_STREAM_SIZE"
+                        description:[NSString stringWithFormat:@"Invalid streaming size %.0fx%.0f", sizeCapture.width, sizeCapture.height]];
+            self->_isStreaming = NO;
+            return;
+        }
+        RigattaTrace([NSString stringWithFormat:@"checkpoint 5 openWithUrl width=%.0f height=%.0f bitrate=%d", sizeCapture.width, sizeCapture.height, bitrateCapture.intValue]);
+        RigattaWatchdogStart(self->_dispatchQueue);
         [self->_rtmpStream openWithUrl:urlCapture width:sizeCapture.width height:sizeCapture.height bitrate:bitrateCapture.integerValue];
+        RigattaTrace(@"checkpoint 6 openWithUrl returned");
     });
 }
 
@@ -895,7 +1052,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         
         if (_isStreaming) {
             _isStreaming = NO;
-//            [_rtmpStream close];
+            RigattaWatchdogStop();
+            [_rtmpStream close];
         }
         result(nil);
     }
@@ -911,7 +1069,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     } else {
         if (_isStreaming) {
             _isStreaming = NO;
-//            [_rtmpStream close];
+            RigattaWatchdogStop();
+            [_rtmpStream close];
         }
         result(nil);
     }
@@ -967,22 +1126,31 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (BOOL)setupWriterForUrl:(NSString *)path {
+    RigattaTrace([NSString stringWithFormat:@"checkpoint W1 setupWriterForUrl enableAudio=%@ isAudioSetup=%@", _enableAudio ? @"YES" : @"NO", _isAudioSetup ? @"YES" : @"NO"]);
     NSError *error = nil;
     NSURL *outputURL;
     if (path != nil) {
         outputURL = [NSURL URLWithString:path];
     } else {
+        [self emitErrorWithCode:@"INVALID_URL" description:@"RTMP URL is nil"];
+        return NO;
+    }
+    if (outputURL == nil) {
+        [self emitErrorWithCode:@"INVALID_URL_PARSE" description:@"Unable to parse RTMP URL"];
         return NO;
     }
     if (_enableAudio && !_isAudioSetup) {
+        RigattaTrace(@"checkpoint W2 audio setup required");
         [self setUpCaptureSessionForAudio];
     }
     
     // Add the audio input
     if (_enableAudio) {
+        RigattaTrace(@"checkpoint W3 binding audio delegate");
         [_audioOutput setSampleBufferDelegate:self queue:_dispatchQueue];
     }
     
+    RigattaTrace(@"checkpoint W4 binding video delegate");
     [_captureVideoOutput setSampleBufferDelegate:self queue:_dispatchQueue];
     
     return YES;
@@ -1052,29 +1220,41 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 - (void)setUpCaptureSessionForAudio {
+    RigattaTrace(@"checkpoint A1 setUpCaptureSessionForAudio entered");
     NSError *error = nil;
     AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+    if (audioDevice == nil) {
+        [self emitErrorWithCode:@"NO_AUDIO_DEVICE" description:@"No audio capture device available"];
+        return;
+    }
     AVCaptureDeviceInput *audioInput = [AVCaptureDeviceInput deviceInputWithDevice:audioDevice
                                                                              error:&error];
     if (error) {
-        _eventSink(@{@"event" : @"error", @"errorDescription" : error.description});
+        [self emitErrorWithCode:@"AUDIO_INPUT_ERROR" description:error.description];
         return;
     }
     _audioOutput = [[AVCaptureAudioDataOutput alloc] init];
     
+    RigattaTrace(@"checkpoint A2 begin audio captureSession config");
     [_captureSession beginConfiguration];
     if ([_captureSession canAddInput:audioInput]) {
         [_captureSession addInput:audioInput];
         if ([_captureSession canAddOutput:_audioOutput]) {
             [_captureSession addOutput:_audioOutput];
             _isAudioSetup = YES;
+            RigattaTrace(@"checkpoint A3 audio input/output added");
         } else {
-            _eventSink(@{@"event" : @"error",
-                         @"errorDescription" : @"Unable to add Audio input/output to session capture"});
+            [self emitErrorWithCode:@"AUDIO_OUTPUT_ATTACH_FAILED"
+                        description:@"Unable to add Audio input/output to session capture"];
             _isAudioSetup = NO;
         }
+    } else {
+        [self emitErrorWithCode:@"AUDIO_INPUT_ATTACH_FAILED"
+                    description:@"Unable to add audio input to capture session"];
+        _isAudioSetup = NO;
     }
     [_captureSession commitConfiguration];
+    RigattaTrace(@"checkpoint A4 commit audio captureSession config");
 }
 @end
 
@@ -1109,13 +1289,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
     if (_dispatchQueue == nil) {
-        _dispatchQueue = dispatch_queue_create("com.app.rtmp_broadcaster.dispatchqueue", NULL);
+        _dispatchQueue = dispatch_queue_create("com.app.rtmp_broadcaster.dispatchqueue", DISPATCH_QUEUE_SERIAL);
     }
-    
-    // Invoke the plugin on another dispatch queue to avoid blocking the UI.
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self handleMethodCallAsync:call result:result];
-    });
+    [self handleMethodCallAsync:call result:result];
 }
 
 - (void)handleMethodCallAsync:(FlutterMethodCall *)call result:(FlutterResult)result {

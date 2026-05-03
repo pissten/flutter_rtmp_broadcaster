@@ -1,6 +1,7 @@
 import Flutter
 import Foundation
 import AVFoundation
+import CoreMedia
 import QuartzCore
 import LFLiveKit
 
@@ -17,6 +18,9 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     // CMSampleBuffer PTS for both paths (LFLive default NOW on separate queues
     // can be non-monotonic vs capture → periodic MSE/player stalls).
     private let pushMediaQueue = DispatchQueue(label: "rigatta.lflive.pushMedia", qos: .userInitiated)
+    /// Strictly increasing ms per track so LFLive sort + FLV/MSE never see duplicate timestamps (avoids long-run video "slow drift").
+    private var lastVideoPtsMs: UInt64 = 0
+    private var lastAudioPtsMs: UInt64 = 0
 
     @objc
     public init(sink: @escaping FlutterEventSink) {
@@ -36,8 +40,9 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         // (~8 frames) → pushVideo blocks permanently after ~8 frames.
         let effectiveWidth = width > 0 ? width : 480
         let effectiveHeight = height > 0 ? height : 720
-        // Ceiling from Dart (e.g. 1 Mbps). Start low; LFLive adaptiveBitrate ramps toward max when buffer allows.
-        let ceilingBps = UInt(bitrate > 0 ? bitrate : 1_000_000)
+        // Ceiling from Dart; cap uplink for mobile RTMP so downstream TCP (go2rtc/MSE) does not build multi‑minute delay.
+        let requestedCeiling = bitrate > 0 ? bitrate : 1_000_000
+        let ceilingBps = UInt(min(requestedCeiling, 768_000))
         let startBps = UInt(
             max(
                 200_000,
@@ -51,10 +56,10 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
             )
         )
         let videoFps: UInt = 30
-        // ~1 s GOP at 30 fps: fewer/larger IDR bursts than 0.5s GOP, smoother for RTMP/MSE.
-        let gopFrames: UInt = 30
+        // ~2 s GOP at 30 fps: fewer IDR bursts than 1 s GOP (less uplink jitter → less viewer buffer growth).
+        let gopFrames: UInt = 60
         NSLog(
-            "[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) start=\(startBps) max=\(ceilingBps) min=\(minBps) adaptive=ON fps=\(videoFps) gop=\(gopFrames)"
+            "[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) start=\(startBps) max=\(ceilingBps) min=\(minBps) adaptive=OFF fps=\(videoFps) gop=\(gopFrames)"
         )
 
         let audioConfig = LFLiveAudioConfiguration.defaultConfiguration(for: LFLiveAudioQuality.high)
@@ -77,10 +82,13 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         )
         session?.delegate = self
         session?.showDebugInfo = true
-        session?.adaptiveBitrate = true
+        // Fixed bitrate path: LFLive adaptive + VT keyframes caused uplink bursts; same chain works for Android/ffmpeg.
+        session?.adaptiveBitrate = false
         session?.reconnectCount = 0
         session?.reconnectInterval = 1
         liveSession = session
+        lastVideoPtsMs = 0
+        lastAudioPtsMs = 0
 
         emit([
             "event": "rtmp_debug_split",
@@ -107,13 +115,14 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     public func addVideoData(buffer: CMSampleBuffer) {
         guard isPublishing, !isPaused else { return }
         guard let imageBuffer = CMSampleBufferGetImageBuffer(buffer) else { return }
-        let tsMs = Self.millisFromSampleBufferPts(buffer)
+        let rawMs = Self.millisFromSampleBufferPts(buffer)
         // Explicit retain so buffer cannot be reclaimed by AVCapture pool
         // before the async block runs the encoder. Released after pushVideo.
         let retained = Unmanaged.passRetained(imageBuffer)
         pushMediaQueue.async { [weak self] in
             defer { retained.release() }
             guard let self = self, self.isPublishing, !self.isPaused else { return }
+            let tsMs = self.nextMonotonicVideoPts(raw: rawMs)
             RigattaWatchdogTickPushVideoEnter()
             self.liveSession?.pushVideo(retained.takeUnretainedValue(), timeStampMs: tsMs)
             RigattaWatchdogTickPushVideoExit()
@@ -124,9 +133,10 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     public func addAudioData(buffer: CMSampleBuffer) {
         guard isPublishing, !isPaused else { return }
         guard let pcmData = pcmDataFromSampleBuffer(buffer) else { return }
-        let tsMs = Self.millisFromSampleBufferPts(buffer)
+        let rawMs = Self.millisFromSampleBufferPts(buffer)
         pushMediaQueue.async { [weak self] in
             guard let self = self, self.isPublishing, !self.isPaused else { return }
+            let tsMs = self.nextMonotonicAudioPts(raw: rawMs)
             RigattaWatchdogTickPushAudioEnter()
             self.liveSession?.pushAudio(pcmData, timeStampMs: tsMs)
             RigattaWatchdogTickPushAudioExit()
@@ -134,16 +144,35 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
     }
 
     /// Presentation time in milliseconds (same master clock for audio + video from AVCapture).
+    /// Uses CMTimeConvertScale instead of `seconds * 1000` + UInt64 truncation to avoid systematic rounding loss at 30 fps.
     private static func millisFromSampleBufferPts(_ sampleBuffer: CMSampleBuffer) -> UInt64 {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if !CMTIME_IS_VALID(pts) || CMTIME_IS_INDEFINITE(pts) {
             return UInt64(CACurrentMediaTime() * 1000.0)
         }
-        let seconds = CMTimeGetSeconds(pts)
-        if seconds.isNaN || seconds.isInfinite || seconds < 0 {
+        let msTime = CMTimeConvertScale(pts, timescale: 1000, method: .default)
+        if !CMTIME_IS_VALID(msTime) || msTime.value < 0 {
             return UInt64(CACurrentMediaTime() * 1000.0)
         }
-        return UInt64(seconds * 1000.0)
+        return UInt64(msTime.value)
+    }
+
+    private func nextMonotonicVideoPts(raw: UInt64) -> UInt64 {
+        if raw > lastVideoPtsMs {
+            lastVideoPtsMs = raw
+        } else {
+            lastVideoPtsMs += 1
+        }
+        return lastVideoPtsMs
+    }
+
+    private func nextMonotonicAudioPts(raw: UInt64) -> UInt64 {
+        if raw > lastAudioPtsMs {
+            lastAudioPtsMs = raw
+        } else {
+            lastAudioPtsMs += 1
+        }
+        return lastAudioPtsMs
     }
 
     private func pcmDataFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> Data? {
@@ -257,6 +286,8 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         liveSession = nil
         isPublishing = false
         isPaused = false
+        lastVideoPtsMs = 0
+        lastAudioPtsMs = 0
         latestDebugInfo = nil
         latestState = .ready
         activePublishUrl = ""

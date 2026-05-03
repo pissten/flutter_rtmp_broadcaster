@@ -435,9 +435,17 @@ class CameraController extends ValueNotifier<CameraValue> {
     final String? eventType =
         map!['eventType'] as String? ?? map['event'] as String?;
     final String? errorDescription = map['errorDescription'];
+    final String? statusCode = map['code'] as String?;
+    final String? statusLevel = map['level'] as String?;
+    final String? connectUrl = map['connectUrl'] as String?;
+    final String? publishName = map['publishName'] as String?;
     final Map<String, dynamic> uniEvent = <String, dynamic>{
       'eventType': eventType,
-      'errorDescription': errorDescription
+      'errorDescription': errorDescription,
+      'code': statusCode,
+      'level': statusLevel,
+      'connectUrl': connectUrl,
+      'publishName': publishName,
     };
     switch (eventType) {
       case 'error':
@@ -456,6 +464,35 @@ class CameraController extends ValueNotifier<CameraValue> {
         break;
       case 'rtmp_retry':
         log('🔁 RETRY: $errorDescription', name: 'RTMP');
+        value = value.copyWith(event: uniEvent);
+        break;
+      case 'rtmp_fatal':
+        log('🧨 FATAL: $errorDescription', name: 'RTMP');
+        value = value.copyWith(
+          isStreamingVideoRtmp: false,
+          errorDescription: errorDescription,
+          event: uniEvent,
+        );
+        break;
+      case 'rtmp_stream_error':
+        log('❌ STREAM ERROR: $errorDescription', name: 'RTMP');
+        value = value.copyWith(
+          errorDescription: errorDescription,
+          event: uniEvent,
+        );
+        break;
+      case 'rtmp_status':
+        log(
+          'ℹ️ RTMP STATUS: code=$statusCode level=$statusLevel desc=$errorDescription',
+          name: 'RTMP',
+        );
+        value = value.copyWith(event: uniEvent);
+        break;
+      case 'rtmp_debug_split':
+        log(
+          '🧭 RTMP SPLIT: connectUrl=$connectUrl publishName=$publishName',
+          name: 'RTMP',
+        );
         value = value.copyWith(event: uniEvent);
         break;
       case 'rtmp_stopped':
