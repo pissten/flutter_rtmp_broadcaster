@@ -36,20 +36,35 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         // (~8 frames) → pushVideo blocks permanently after ~8 frames.
         let effectiveWidth = width > 0 ? width : 480
         let effectiveHeight = height > 0 ? height : 720
-        // Use requested bitrate as-is — capping + very short GOP caused huge IDR spikes vs budget
-        // and periodic viewer stalls (~5s) on some chains.
-        let effectiveBitrate = bitrate > 0 ? bitrate : 1_000_000
+        // Ceiling from Dart (e.g. 1 Mbps). Start low; LFLive adaptiveBitrate ramps toward max when buffer allows.
+        let ceilingBps = UInt(bitrate > 0 ? bitrate : 1_000_000)
+        let startBps = UInt(
+            max(
+                200_000,
+                min(Int(Double(ceilingBps) * 0.35), Int(ceilingBps))
+            )
+        )
+        let minBps = UInt(
+            max(
+                120_000,
+                min(Int(Double(ceilingBps) * 0.22), Int(startBps) - 20_000)
+            )
+        )
         let videoFps: UInt = 30
         // ~1 s GOP at 30 fps: fewer/larger IDR bursts than 0.5s GOP, smoother for RTMP/MSE.
         let gopFrames: UInt = 30
-        NSLog("[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) bitrate=\(effectiveBitrate) fps=\(videoFps) gop=\(gopFrames)")
+        NSLog(
+            "[RIGATTA-LF] open size=\(effectiveWidth)x\(effectiveHeight) start=\(startBps) max=\(ceilingBps) min=\(minBps) adaptive=ON fps=\(videoFps) gop=\(gopFrames)"
+        )
 
         let audioConfig = LFLiveAudioConfiguration.defaultConfiguration(for: LFLiveAudioQuality.high)
         let videoConfig = LFLiveVideoConfiguration()
         videoConfig.videoSize = CGSize(width: effectiveWidth, height: effectiveHeight)
-        videoConfig.videoBitRate = UInt(effectiveBitrate)
-        videoConfig.videoMaxBitRate = UInt(effectiveBitrate)
-        videoConfig.videoMinBitRate = UInt(max(300_000, Int(Double(effectiveBitrate) * 0.6)))
+        videoConfig.videoBitRate = startBps
+        videoConfig.videoMaxBitRate = ceilingBps
+        // LFLive adaptive steps down toward min; keep min clearly below start so +50k / −100k can move.
+        let adaptiveFloor = UInt(max(120_000, min(Int(minBps), Int(startBps) - 50_000)))
+        videoConfig.videoMinBitRate = adaptiveFloor
         videoConfig.videoFrameRate = videoFps
         videoConfig.videoMaxKeyframeInterval = gopFrames
 
@@ -62,7 +77,7 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
         )
         session?.delegate = self
         session?.showDebugInfo = true
-        session?.adaptiveBitrate = false
+        session?.adaptiveBitrate = true
         session?.reconnectCount = 0
         session?.reconnectInterval = 1
         liveSession = session
@@ -222,6 +237,13 @@ public class FlutterRTMPStreaming: NSObject, LFLiveSessionDelegate {
             "event": "rtmp_probe",
             "bytesOut": Int(debugInfo?.dataFlow ?? 0),
             "bytesIn": 0,
+            "currentBandwidth": Int(debugInfo?.currentBandwidth ?? 0),
+            "bandwidth": Int(debugInfo?.bandwidth ?? 0),
+            "dropFrame": debugInfo?.dropFrame ?? 0,
+            "totalFrame": debugInfo?.totalFrame ?? 0,
+            "unSendCount": debugInfo?.unSendCount ?? 0,
+            "capturedVideoCount": debugInfo?.capturedVideoCount ?? 0,
+            "capturedAudioCount": debugInfo?.capturedAudioCount ?? 0,
             "errorDescription": ""
         ])
     }
